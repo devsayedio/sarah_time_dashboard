@@ -771,7 +771,15 @@ window.openEditAttendanceModal = function(empId) {
   document.getElementById('editAttCheckIn').value = formatTimeInput(checkInVal);
   document.getElementById('editAttCheckOut').value = formatTimeInput(checkOutVal);
   
-  document.getElementById('editAttendanceModal').style.display = 'flex';
+  const modal = document.getElementById('editAttendanceModal');
+  modal.style.display = 'flex';
+  modal.classList.add('active');
+};
+
+window.closeEditAttendanceModal = function() {
+  const modal = document.getElementById('editAttendanceModal');
+  modal.classList.remove('active');
+  modal.style.display = 'none';
 };
 
 async function handleAttendanceEditSubmit(e) {
@@ -801,7 +809,7 @@ async function handleAttendanceEditSubmit(e) {
     });
     const data = await res.json();
     if (data.success) {
-      document.getElementById('editAttendanceModal').style.display = 'none';
+      closeEditAttendanceModal();
       loadAllData(); // refresh dashboard to reflect changes
     } else {
       alert('Failed to edit attendance: ' + data.error);

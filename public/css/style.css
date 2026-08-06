@@ -875,3 +875,11 @@ input:checked + .slider:before {
 [data-theme="light"] .sidebar-footer p {
   color: var(--text-muted);
 }
+
+/* Fix calendar icon color in dark mode */
+::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}
+[data-theme="light"] ::-webkit-calendar-picker-indicator {
+  filter: invert(0);
+}
