@@ -652,12 +652,28 @@ app.put('/api/attendance/edit', async (req, res) => {
       updateData.lateByMinutes = lateByMinutes;
     }
 
-    await db
+    const attendanceRef = db
       .collection('employees')
       .doc(employeeId)
       .collection('attendance_history')
-      .doc(dateKey)
-      .set(updateData, { merge: true });
+      .doc(dateKey);
+
+    const attendanceSnap = await attendanceRef.get();
+    if (!attendanceSnap.exists) {
+      // A half-written record (no schemaVersion / checkInLocation) makes the app
+      // throw on the whole attendance history, so never create one here.
+      return res.status(404).json({
+        success: false,
+        error: 'No attendance record exists for this date. Only an existing check-in can be edited.'
+      });
+    }
+
+    // The app validates `schemaVersion == 1` on every record it reads.
+    if (attendanceSnap.data().schemaVersion !== 1) {
+      updateData.schemaVersion = 1;
+    }
+
+    await attendanceRef.set(updateData, { merge: true });
 
     res.json({ success: true, employeeId, dateKey });
   } catch (error) {
