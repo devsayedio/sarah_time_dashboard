@@ -480,6 +480,53 @@
             <button type="submit" id="btnSaveEmployee" class="btn-primary" style="display: none;">Save Changes</button>
           </div>
         </form>
+
+        <!-- Employee Monthly Attendance Section -->
+        <div id="empAttendanceSection" style="margin-top: 32px; border-top: 1px solid var(--border-color); padding-top: 24px; display: none;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <h4 style="color: var(--primary); margin: 0;">Monthly Attendance History</h4>
+            <div class="date-picker-box">
+              <input type="month" id="empAttMonthPicker" class="search-input" style="padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-main);">
+            </div>
+          </div>
+          
+          <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr); margin-bottom: 24px;">
+            <div class="stat-card" style="padding: 16px;">
+              <h3 style="font-size: 13px;">Total Present</h3>
+              <p id="empAttTotalPresent" class="stat-value" style="font-size: 20px;">0</p>
+            </div>
+            <div class="stat-card" style="padding: 16px;">
+              <h3 style="font-size: 13px;">Total Late</h3>
+              <p id="empAttTotalLate" class="stat-value" style="font-size: 20px; color: #f59e0b;">0</p>
+            </div>
+            <div class="stat-card" style="padding: 16px;">
+              <h3 style="font-size: 13px;">Total Absent</h3>
+              <p id="empAttTotalAbsent" class="stat-value" style="font-size: 20px; color: var(--danger);">0</p>
+            </div>
+            <div class="stat-card" style="padding: 16px;">
+              <h3 style="font-size: 13px;">Total Hours</h3>
+              <p id="empAttTotalHours" class="stat-value" style="font-size: 20px; color: var(--primary);">0h</p>
+            </div>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>DATE</th>
+                  <th>CHECK-IN</th>
+                  <th>CHECK-OUT</th>
+                  <th>TOTAL HOURS</th>
+                  <th>STATUS</th>
+                  <th>LOCATION</th>
+                </tr>
+              </thead>
+              <tbody id="empAttTableBody">
+                <!-- Populated via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -516,6 +563,6 @@
 
   <!-- Scripts -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/app.js?v=7"></script>
+  <script src="js/app.js?v=9"></script>
 </body>
 </html>

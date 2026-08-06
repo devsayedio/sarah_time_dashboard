@@ -82,6 +82,11 @@ function initUI() {
   
   document.getElementById('editAttendanceForm').addEventListener('submit', handleAttendanceEditSubmit);
   
+  document.getElementById('empAttMonthPicker').addEventListener('change', (e) => {
+    const empId = document.getElementById('editEmpUid').value;
+    if (empId) loadEmployeeAttendance(empId, e.target.value);
+  });
+  
   // Theme Toggle
   const themeBtn = document.getElementById('themeToggleBtn');
   if (themeBtn) {
@@ -522,6 +527,13 @@ window.viewEmployeeProfile = function(empId) {
 
   setEmployeeEditMode(false);
   switchTab('employee-edit');
+  
+  // Load Attendance
+  document.getElementById('empAttendanceSection').style.display = 'block';
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  document.getElementById('empAttMonthPicker').value = currentMonth;
+  loadEmployeeAttendance(empId, currentMonth);
 }
 
 let isEmployeeEditMode = false;
@@ -922,4 +934,125 @@ window.handleDeleteAttendance = async function() {
     btn.textContent = 'Delete Record';
     btn.disabled = false;
   }
-};
+}
+
+// --- Employee Monthly Attendance ---
+async function loadEmployeeAttendance(empId, month) {
+  const tbody = document.getElementById('empAttTableBody');
+  tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">Loading...</td></tr>`;
+  
+  try {
+    const res = await fetch(`/api/employees/${empId}/attendance?month=${month}`);
+    const data = await res.json();
+    
+    if (data.success) {
+      let totalPresent = 0;
+      let totalLate = 0;
+      let totalMinutesWorked = 0;
+      
+      if (data.records.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-muted);">No attendance records found for this month.</td></tr>`;
+      } else {
+        // Sort by date descending (latest first)
+        data.records.sort((a, b) => b.dateKey.localeCompare(a.dateKey));
+        
+        tbody.innerHTML = data.records.map(record => {
+          let checkInStr = 'N/A';
+          let checkOutStr = 'N/A';
+          let hoursWorkedStr = '-';
+          
+          if (record.checkInAt) {
+            checkInStr = new Date(record.checkInAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+          }
+          if (record.checkOutAt) {
+            checkOutStr = new Date(record.checkOutAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+          }
+          
+          if (record.checkInAt && record.checkOutAt) {
+            const diffMs = new Date(record.checkOutAt) - new Date(record.checkInAt);
+            const diffMins = Math.floor(diffMs / 60000);
+            totalMinutesWorked += diffMins;
+            const h = Math.floor(diffMins / 60);
+            const m = diffMins % 60;
+            hoursWorkedStr = `${h}h ${m}m`;
+          }
+          
+          if (record.status === 'present') totalPresent++;
+          if (record.status === 'late') totalLate++;
+          
+          const statusHtml = record.status === 'present' 
+            ? `<span class="badge present">Present</span>`
+            : (record.status === 'late' ? `<span class="badge absent" style="background:rgba(245, 158, 11, 0.15); color:#f59e0b; border-color:rgba(245, 158, 11, 0.3);">Late</span>` : `<span class="badge absent">Unknown</span>`);
+            
+          return `
+            <tr>
+              <td><strong>${record.dateKey}</strong></td>
+              <td>${checkInStr}</td>
+              <td>${checkOutStr}</td>
+              <td>${hoursWorkedStr}</td>
+              <td>${statusHtml}</td>
+              <td style="font-size:12px;">${record.location}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+      
+      // Calculate total absent based on open days vs present+late
+      // We can estimate open days up to today or end of month.
+      // A simple approximation is 22 working days minus present/late.
+      // Or we can just calculate what we know. Let's assume standard working days in the past.
+      // But calculating exact absent days without iterating over the month and checking overrides is complex on frontend.
+      // For now, let's just show a simplified calculation or omit it.
+      // I'll calculate total working days in the month till today.
+      
+      const totalH = Math.floor(totalMinutesWorked / 60);
+      const totalM = totalMinutesWorked % 60;
+      
+      document.getElementById('empAttTotalPresent').textContent = totalPresent;
+      document.getElementById('empAttTotalLate').textContent = totalLate;
+      document.getElementById('empAttTotalHours').textContent = `${totalH}h ${totalM}m`;
+      
+      // Rough absent estimation for the month (only up to current date if current month)
+      const [y, m] = month.split('-');
+      const start = new Date(y, m - 1, 1);
+      const end = new Date(y, m, 0); // last day of month
+      const today = new Date();
+      const calcEnd = (start.getMonth() === today.getMonth() && start.getFullYear() === today.getFullYear()) ? today : end;
+      
+      let workDays = 0;
+      let d = new Date(start);
+      // Active office days check
+      const officeDays = state.officeSettings?.weeklyOfficeDays || [1,2,3,4,5,6,7];
+      while (d <= calcEnd) {
+        // JS Date.getDay() is 0=Sun, 1=Mon, ..., 6=Sat
+        // Our settings: 1=Mon, ..., 7=Sun
+        let jsDay = d.getDay();
+        let sarahDay = jsDay === 0 ? 7 : jsDay;
+        
+        // Simple override check
+        const dStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        const override = state.dateOverrides.find(o => o.dateKey === dStr);
+        
+        let isOpen = false;
+        if (override) {
+          isOpen = override.isOfficeOpen;
+        } else {
+          isOpen = officeDays.includes(sarahDay);
+        }
+        
+        if (isOpen) workDays++;
+        d.setDate(d.getDate() + 1);
+      }
+      
+      const totalAbsent = Math.max(0, workDays - (totalPresent + totalLate));
+      document.getElementById('empAttTotalAbsent').textContent = totalAbsent;
+      
+    } else {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--danger);">${data.error}</td></tr>`;
+    }
+  } catch (err) {
+    console.error('Failed to load employee attendance:', err);
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--danger);">Failed to load data.</td></tr>`;
+  }
+}
+;

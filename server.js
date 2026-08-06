@@ -418,6 +418,44 @@ app.delete('/api/employees/:id', async (req, res) => {
   }
 });
 
+// API 3.3: Get Employee Monthly Attendance
+app.get('/api/employees/:id/attendance', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { month } = req.query; // e.g., 'YYYY-MM'
+
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ success: false, error: 'Valid month query parameter required (YYYY-MM)' });
+    }
+
+    const startKey = `${month}-01`;
+    const endKey = `${month}-31`;
+
+    const attendanceSnap = await db.collection('employees').doc(id).collection('attendance_history')
+      .where(require('firebase-admin/firestore').FieldPath.documentId(), '>=', startKey)
+      .where(require('firebase-admin/firestore').FieldPath.documentId(), '<=', endKey)
+      .get();
+
+    const records = [];
+    attendanceSnap.forEach(doc => {
+      const data = doc.data();
+      records.push({
+        dateKey: doc.id,
+        checkInAt: data.checkInAt ? data.checkInAt.toDate().toISOString() : null,
+        checkOutAt: data.checkOutAt ? data.checkOutAt.toDate().toISOString() : null,
+        status: data.status,
+        lateByMinutes: data.lateByMinutes,
+        location: data.checkInLocation?.address || 'N/A'
+      });
+    });
+
+    res.json({ success: true, records });
+  } catch (error) {
+    console.error('Error fetching employee attendance:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // API 4: Attendance History Log
 app.get('/api/attendance', async (req, res) => {
   try {
