@@ -755,7 +755,9 @@ app.post('/api/settings/office', async (req, res) => {
       weeklyOfficeDays: Array.isArray(weeklyOfficeDays) ? weeklyOfficeDays.map(Number) : [1, 2, 3, 4, 5, 6, 7]
     };
 
-    await db.collection('settings').doc('office').set(updateData, { merge: true });
+    // The app rejects the office policy if it carries any key outside this exact
+    // set, so overwrite the document instead of merging.
+    await db.collection('settings').doc('office').set(updateData);
     res.json({ success: true, settings: updateData });
   } catch (error) {
     console.error('Error updating office settings:', error);
