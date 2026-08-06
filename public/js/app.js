@@ -790,8 +790,10 @@ window.openEditAttendanceModal = function(empId) {
   // Format to HH:mm for time input if value exists
   const formatTimeInput = (timeStr) => {
     if (!timeStr || timeStr === '-' || timeStr === 'Pending' || timeStr === 'N/A') return '';
-    // timeStr could be like '10:15 AM'
-    const parts = timeStr.match(/(\d+):(\d+)\s(AM|PM)/i);
+    // timeStr could be like '08:17:20 AM' (with seconds) or '10:15 AM' (without)
+    // Strip seconds: '08:17:20 AM' -> '08:17 AM'
+    const normalized = timeStr.replace(/(\d+:\d+):\d+\s/, '$1 ');
+    const parts = normalized.match(/(\d+):(\d+)\s(AM|PM)/i);
     if (parts) {
       let h = parseInt(parts[1]);
       let m = parts[2];

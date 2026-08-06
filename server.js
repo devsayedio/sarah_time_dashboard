@@ -512,12 +512,37 @@ app.put('/api/attendance/edit', async (req, res) => {
       return require('firebase-admin/firestore').Timestamp.fromDate(dateObj);
     };
 
+    // Fetch office policy to calculate proper status (same logic as Flutter classifyCheckIn)
+    const policySnap = await db.collection('settings').doc('office').get();
+    const officePolicy = policySnap.exists ? policySnap.data() : null;
+
     const updateData = {};
     if (checkInTime && checkInTime !== '-') updateData.checkInAt = createTimestamp(checkInTime);
     if (checkOutTime && checkOutTime !== '-') updateData.checkOutAt = createTimestamp(checkOutTime);
-    
-    if (updateData.checkInAt) {
-       updateData.status = 'present';
+
+    if (updateData.checkInAt && checkInTime && checkInTime !== '-') {
+      // classifyCheckIn: same as Firebase function logic
+      // checkInTime is "HH:MM" (24h)
+      const [inHour, inMin] = checkInTime.split(':').map(Number);
+      const checkInMinuteOfDay = inHour * 60 + inMin;
+
+      let status = 'present';
+      let lateByMinutes = 0;
+
+      if (officePolicy && officePolicy.startTimeLocal) {
+        const [startH, startM] = officePolicy.startTimeLocal.split(':').map(Number);
+        const startMinuteOfDay = startH * 60 + startM;
+        const lateThreshold = officePolicy.lateThresholdMinutes ?? 0;
+
+        const delayMinutes = Math.max(0, checkInMinuteOfDay - startMinuteOfDay);
+        if (delayMinutes > lateThreshold) {
+          status = 'late';
+          lateByMinutes = delayMinutes;
+        }
+      }
+
+      updateData.status = status;
+      updateData.lateByMinutes = lateByMinutes;
     }
 
     await db
