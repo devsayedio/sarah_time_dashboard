@@ -472,6 +472,7 @@ window.openAddEmployee = function() {
   document.getElementById('editEmpDesignation').value = '';
   document.getElementById('editEmpDepartment').value = '';
   document.getElementById('editEmpType').value = 'Full-Time';
+  document.getElementById('editEmpJoiningDate').value = new Date().toISOString().slice(0, 10);
   document.getElementById('editEmpOfficialEmail').value = '';
   document.getElementById('editEmpSalary').value = '';
   document.getElementById('editEmpEmergencyName').value = '';
@@ -513,6 +514,7 @@ window.viewEmployeeProfile = function(empId) {
   document.getElementById('editEmpDesignation').value = p.designation || '';
   document.getElementById('editEmpDepartment').value = p.department || '';
   document.getElementById('editEmpType').value = p.employmentType || '';
+  document.getElementById('editEmpJoiningDate').value = p.joiningDate || '';
   document.getElementById('editEmpOfficialEmail').value = p.officialEmail || emp.authEmail || '';
   document.getElementById('editEmpSalary').value = p.salary || '';
 
@@ -595,6 +597,7 @@ async function handleEmployeeUpdate(e) {
     designation: document.getElementById('editEmpDesignation').value,
     department: document.getElementById('editEmpDepartment').value,
     employmentType: document.getElementById('editEmpType').value,
+    joiningDate: document.getElementById('editEmpJoiningDate').value,
     officialEmail: document.getElementById('editEmpOfficialEmail').value,
     salary: document.getElementById('editEmpSalary').value,
     

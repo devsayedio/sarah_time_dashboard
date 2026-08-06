@@ -16,6 +16,53 @@ const db = getFirestore();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// The Flutter app parses every profile field with a strict `String` check and
+// `joiningDate` as a `Timestamp`. A missing field throws a FormatException and
+// breaks the whole profile/home screen, so every document must be complete.
+const PROFILE_STRING_FIELDS = [
+  'employeeName',
+  'employeeId',
+  'profileImagePath',
+  'designation',
+  'department',
+  'employmentType',
+  'officialEmail',
+  'phoneNumber',
+  'personalEmail',
+  'presentAddress',
+  'emergencyContactName',
+  'emergencyContactNumber',
+  'emergencyContactRelationship',
+  'permanentAddress',
+  'nidOrPassport',
+  'bankAccount',
+  'salary'
+];
+
+// Bundled asset path in the Flutter app (SvgPath.icDemoUser).
+const DEFAULT_PROFILE_IMAGE_PATH = 'assets/png/ic_demo_user.png';
+
+function toProfileString(value) {
+  return value === undefined || value === null ? '' : String(value);
+}
+
+// Firestore Timestamp -> 'YYYY-MM-DD' (Dhaka) for <input type="date">.
+function toDateInputValue(timestamp) {
+  if (!timestamp || typeof timestamp.toDate !== 'function') return '';
+  return getDhakaDateKey(timestamp.toDate());
+}
+
+// Accepts 'YYYY-MM-DD' and stores midnight Dhaka time, matching how the app reads it.
+function toJoiningTimestamp(value) {
+  const { Timestamp } = require('firebase-admin/firestore');
+  if (value) {
+    const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00+06:00`);
+    if (!isNaN(parsed.getTime())) return Timestamp.fromDate(parsed);
+  }
+  const todayKey = getDhakaDateKey();
+  return Timestamp.fromDate(new Date(`${todayKey}T00:00:00+06:00`));
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -231,6 +278,8 @@ app.get('/api/employees', async (req, res) => {
         .get();
 
       const profile = profileSnap.exists ? profileSnap.data() : {};
+      // Timestamps serialize as {_seconds,...}; the form needs a date input value.
+      profile.joiningDate = toDateInputValue(profile.joiningDate);
 
       const attSnap = await db
         .collection('employees')
@@ -257,8 +306,8 @@ app.get('/api/employees', async (req, res) => {
 
       employees.push({
         id: empId,
-        authEmail: empData.authEmail || profile.officialEmail || 'N/A',
-        employeeCode: empData.employeeId || profile.employeeId || empId,
+        authEmail: empData.authEmail || profile.personalEmail || 'N/A',
+        employeeCode: empData.employeeCode || profile.employeeId || empId,
         isActive: empData.isActive !== false,
         fcmToken: empData.fcmToken || null,
         profile,
@@ -297,12 +346,8 @@ app.post('/api/employees/:id/toggle-status', async (req, res) => {
 // API 3.0: Create New Employee (with Firebase Auth)
 app.post('/api/employees', async (req, res) => {
   try {
-    const {
-      employeeName, phoneNumber, personalEmail, nidOrPassport, presentAddress, permanentAddress,
-      employeeId, designation, department, employmentType, officialEmail, salary,
-      emergencyContactName, emergencyContactNumber, emergencyContactRelationship, bankAccount
-    } = req.body;
-    
+    const { employeeName, personalEmail, employeeId, joiningDate } = req.body;
+
     const emailToUse = personalEmail;
     if (!emailToUse) {
       return res.status(400).json({ success: false, error: "A personal email is required to create an account." });
@@ -324,25 +369,30 @@ app.post('/api/employees', async (req, res) => {
 
     const uid = userRecord.uid;
 
+    // Write every field the app expects, blank string instead of missing.
     const profileData = {
-      employeeName, phoneNumber, personalEmail, nidOrPassport, presentAddress, permanentAddress,
-      employeeId, designation, department, employmentType, officialEmail, salary,
-      emergencyContactName, emergencyContactNumber, emergencyContactRelationship, bankAccount,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp()
-    };
-    
-    // Remove undefined values
-    Object.keys(profileData).forEach(key => profileData[key] === undefined && delete profileData[key]);
-
-    // Create main employee doc
-    const mainEmpData = {
+      schemaVersion: 1,
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
-      authEmail: emailToUse
+      joiningDate: toJoiningTimestamp(joiningDate)
     };
-    if (employeeId) mainEmpData.employeeCode = employeeId;
-    
+    for (const field of PROFILE_STRING_FIELDS) {
+      profileData[field] = toProfileString(req.body[field]);
+    }
+    if (!profileData.profileImagePath) {
+      profileData.profileImagePath = DEFAULT_PROFILE_IMAGE_PATH;
+    }
+
+    // Create main employee doc. `isActive` is required by the app and by the
+    // markAttendance cloud function, so a new employee must start active.
+    const mainEmpData = {
+      isActive: true,
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      authEmail: emailToUse,
+      employeeCode: toProfileString(employeeId)
+    };
+
     await db.collection('employees').doc(uid).set(mainEmpData);
 
     // Create profile doc
@@ -359,29 +409,48 @@ app.post('/api/employees', async (req, res) => {
 app.put('/api/employees/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const {
-      employeeName, phoneNumber, personalEmail, nidOrPassport, presentAddress, permanentAddress,
-      employeeId, designation, department, employmentType, officialEmail, salary,
-      emergencyContactName, emergencyContactNumber, emergencyContactRelationship, bankAccount
-    } = req.body;
+    const { employeeId, joiningDate } = req.body;
+
+    const profileSnap = await db
+      .collection('employees')
+      .doc(id)
+      .collection('profile')
+      .doc('details')
+      .get();
+    const existingProfile = profileSnap.exists ? profileSnap.data() : {};
 
     const profileData = {
-      employeeName, phoneNumber, personalEmail, nidOrPassport, presentAddress, permanentAddress,
-      employeeId, designation, department, employmentType, officialEmail, salary,
-      emergencyContactName, emergencyContactNumber, emergencyContactRelationship, bankAccount,
+      schemaVersion: 1,
       updatedAt: FieldValue.serverTimestamp()
     };
-    
-    // Remove undefined values to avoid overwriting with undefined
-    Object.keys(profileData).forEach(key => profileData[key] === undefined && delete profileData[key]);
+    // Only send fields the client actually submitted; fall back to what is
+    // already stored so an incomplete form can never strip a required field.
+    for (const field of PROFILE_STRING_FIELDS) {
+      const submitted = req.body[field];
+      profileData[field] = submitted === undefined
+        ? toProfileString(existingProfile[field])
+        : toProfileString(submitted);
+    }
+    if (!profileData.profileImagePath) {
+      profileData.profileImagePath = DEFAULT_PROFILE_IMAGE_PATH;
+    }
+    if (joiningDate || existingProfile.joiningDate === undefined) {
+      profileData.joiningDate = toJoiningTimestamp(joiningDate);
+    }
 
-    // Update main employee doc
+    // Update main employee doc. `authEmail` mirrors the Firebase Auth login
+    // email, so it must never be replaced by the official (work) email here.
     const mainEmpData = {
       updatedAt: FieldValue.serverTimestamp()
     };
-    if (employeeId) mainEmpData.employeeId = employeeId;
-    if (officialEmail) mainEmpData.authEmail = officialEmail;
-    
+    if (employeeId) mainEmpData.employeeCode = String(employeeId);
+
+    // Repair documents created before `isActive` was written.
+    const empSnap = await db.collection('employees').doc(id).get();
+    if (typeof empSnap.data()?.isActive !== 'boolean') {
+      mainEmpData.isActive = true;
+    }
+
     await db.collection('employees').doc(id).set(mainEmpData, { merge: true });
 
     // Update profile doc
@@ -496,7 +565,7 @@ app.get('/api/attendance', async (req, res) => {
         attendanceLogs.push({
           id: empId,
           employeeName: profile.employeeName || empData.authEmail || 'Unknown',
-          employeeCode: profile.employeeId || empData.employeeId || empId,
+          employeeCode: profile.employeeId || empData.employeeCode || empId,
           designation: profile.designation || 'N/A',
           department: profile.department || 'N/A',
           dateKey: targetDate,
@@ -512,7 +581,7 @@ app.get('/api/attendance', async (req, res) => {
           attendanceLogs.push({
             id: empId,
             employeeName: profile.employeeName || empData.authEmail || 'Unknown',
-            employeeCode: profile.employeeId || empData.employeeId || empId,
+            employeeCode: profile.employeeId || empData.employeeCode || empId,
             designation: profile.designation || 'N/A',
             department: profile.department || 'N/A',
             dateKey: targetDate,
