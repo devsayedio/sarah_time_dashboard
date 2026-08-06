@@ -196,9 +196,9 @@ app.post('/api/employees', async (req, res) => {
       emergencyContactName, emergencyContactNumber, emergencyContactRelationship, bankAccount
     } = req.body;
     
-    const emailToUse = officialEmail || personalEmail;
+    const emailToUse = personalEmail;
     if (!emailToUse) {
-      return res.status(400).json({ success: false, error: "An official or personal email is required to create an account." });
+      return res.status(400).json({ success: false, error: "A personal email is required to create an account." });
     }
 
     const { getAuth } = require('firebase-admin/auth');

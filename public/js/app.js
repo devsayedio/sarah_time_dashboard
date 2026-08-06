@@ -374,7 +374,24 @@ window.openAddEmployee = function() {
   document.getElementById('editEmpNid').value = '';
   document.getElementById('editEmpPresentAddress').value = '';
   document.getElementById('editEmpPermanentAddress').value = '';
-  document.getElementById('editEmpId').value = '';
+  
+  // Auto-generate employee ID
+  let nextIdNum = 1;
+  if (state.employees && state.employees.length > 0) {
+    const ids = state.employees
+      .map(e => {
+        const idStr = (e.profile?.employeeId || e.employeeCode || '');
+        if (idStr.startsWith('ST')) {
+          return parseInt(idStr.substring(2), 10) || 0;
+        }
+        return 0;
+      })
+      .filter(n => !isNaN(n));
+    if (ids.length > 0) {
+      nextIdNum = Math.max(...ids) + 1;
+    }
+  }
+  document.getElementById('editEmpId').value = 'ST' + String(nextIdNum).padStart(3, '0');
   document.getElementById('editEmpDesignation').value = '';
   document.getElementById('editEmpDepartment').value = '';
   document.getElementById('editEmpType').value = 'Full-Time';
@@ -443,8 +460,18 @@ function setEmployeeEditMode(isEdit) {
   
   inputs.forEach(input => {
     if (input.type !== 'hidden') {
-      input.readOnly = !isEdit;
-      if (!isEdit) {
+      let shouldBeReadOnly = !isEdit;
+      
+      if (input.id === 'editEmpId') {
+        shouldBeReadOnly = true; // Never edit employee ID
+      }
+      
+      if (input.id === 'editEmpPersonalEmail' && !isNewEmployee) {
+        shouldBeReadOnly = true; // Personal email cannot be edited after creation
+      }
+
+      input.readOnly = shouldBeReadOnly;
+      if (shouldBeReadOnly) {
         input.style.backgroundColor = 'var(--input-readonly)';
         input.style.border = '1px solid transparent';
       } else {
