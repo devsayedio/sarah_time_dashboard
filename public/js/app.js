@@ -657,6 +657,13 @@ function populateSettingsForm() {
   document.getElementById('settingEnd').value = s.endTimeLocal || '18:00';
   document.getElementById('settingLate').value = s.lateThresholdMinutes || 15;
   document.getElementById('settingCheckinOpen').value = s.checkInOpensBeforeMinutes || 30;
+
+  // Load weeklyOfficeDays checkboxes
+  const activeDays = Array.isArray(s.weeklyOfficeDays) ? s.weeklyOfficeDays.map(Number) : [1,2,3,4,5,6,7];
+  [1,2,3,4,5,6,7].forEach(day => {
+    const el = document.getElementById(`day${day}`);
+    if (el) el.checked = activeDays.includes(day);
+  });
 }
 
 function renderDateOverrides() {
@@ -689,7 +696,10 @@ async function handlePolicySubmit(e) {
     endTimeLocal: document.getElementById('settingEnd').value,
     lateThresholdMinutes: document.getElementById('settingLate').value,
     checkInOpensBeforeMinutes: document.getElementById('settingCheckinOpen').value,
-    weeklyOfficeDays: [1, 2, 3, 4, 5, 6, 7]
+    weeklyOfficeDays: [1,2,3,4,5,6,7].filter(day => {
+      const el = document.getElementById(`day${day}`);
+      return el && el.checked;
+    })
   };
 
   try {

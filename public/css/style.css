@@ -902,3 +902,45 @@ input:checked + .slider:before {
 [data-theme="light"] ::-webkit-calendar-picker-indicator {
   filter: invert(0);
 }
+
+/* Weekly Office Days Checkboxes */
+.day-checkbox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.day-checkbox input[type="checkbox"] {
+  display: none;
+}
+
+.day-checkbox:has(input:checked) {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: white;
+  box-shadow: 0 4px 12px var(--primary-glow);
+}
+
+.day-checkbox:hover:not(:has(input:checked)) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+[data-theme="light"] .day-checkbox {
+  background: #f8fafc;
+}
+
+[data-theme="light"] .day-checkbox:has(input:checked) {
+  background: var(--primary);
+  color: white;
+}

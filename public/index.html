@@ -285,6 +285,40 @@
               </div>
             </div>
 
+            <div class="form-group" style="margin-top: 8px;">
+              <label style="margin-bottom: 12px; display: block;">Weekly Office Days</label>
+              <div id="weeklyDaysGrid" style="display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px;">
+                <label class="day-checkbox" data-day="7" title="Sunday">
+                  <input type="checkbox" value="7" id="day7">
+                  <span>রবি</span>
+                </label>
+                <label class="day-checkbox" data-day="1" title="Monday">
+                  <input type="checkbox" value="1" id="day1">
+                  <span>সোম</span>
+                </label>
+                <label class="day-checkbox" data-day="2" title="Tuesday">
+                  <input type="checkbox" value="2" id="day2">
+                  <span>মঙ্গল</span>
+                </label>
+                <label class="day-checkbox" data-day="3" title="Wednesday">
+                  <input type="checkbox" value="3" id="day3">
+                  <span>বুধ</span>
+                </label>
+                <label class="day-checkbox" data-day="4" title="Thursday">
+                  <input type="checkbox" value="4" id="day4">
+                  <span>বৃহঃ</span>
+                </label>
+                <label class="day-checkbox" data-day="5" title="Friday">
+                  <input type="checkbox" value="5" id="day5">
+                  <span>শুক্র</span>
+                </label>
+                <label class="day-checkbox" data-day="6" title="Saturday">
+                  <input type="checkbox" value="6" id="day6">
+                  <span>শনি</span>
+                </label>
+              </div>
+            </div>
+
             <button type="submit" class="btn-primary" style="margin-top:16px; width:100%; justify-content:center;">
               Save Policy Changes
             </button>
@@ -482,6 +516,6 @@
 
   <!-- Scripts -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/app.js?v=6"></script>
+  <script src="js/app.js?v=7"></script>
 </body>
 </html>
