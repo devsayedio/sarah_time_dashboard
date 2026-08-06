@@ -67,6 +67,8 @@ function initUI() {
   
   document.getElementById('btnEditEmployeeToggle').addEventListener('click', toggleEmployeeEditMode);
   
+  document.getElementById('editAttendanceForm').addEventListener('submit', handleAttendanceEditSubmit);
+  
   // Theme Toggle
   const themeBtn = document.getElementById('themeToggleBtn');
   if (themeBtn) {
@@ -155,6 +157,15 @@ async function fetchStats() {
 
 function renderStatsCards() {
   if (!state.stats) return;
+  
+  const banner = document.getElementById('holidayBanner');
+  if (state.stats.isHoliday) {
+    banner.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"></path><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg> <span>Office Status: <strong>${state.stats.holidayReason || state.stats.holidayStatusText}</strong></span>`;
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+  
   document.getElementById('statTotalEmployees').textContent = state.stats.activeEmployees;
   document.getElementById('statPresent').textContent = state.stats.presentCount;
   document.getElementById('statLate').textContent = state.stats.lateCount;
@@ -253,6 +264,11 @@ function renderDashSummary() {
         <td>${checkOut}</td>
         <td>${statusHtml}</td>
         <td>${late} mins</td>
+        <td>
+          <button class="btn-icon" onclick="openEditAttendanceModal('${emp.id}')" title="Edit Attendance">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+          </button>
+        </td>
       </tr>
     `;
   }).join('');
@@ -270,7 +286,7 @@ function renderAttendanceLogs() {
   });
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No records matching filters.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:var(--text-muted);">No records matching filters.</td></tr>`;
     return;
   }
 
@@ -287,6 +303,11 @@ function renderAttendanceLogs() {
         <td>${log.checkOutAt}</td>
         <td><span class="badge ${log.status}">${log.status}</span></td>
         <td style="max-width:250px; font-size:12px; color:var(--text-muted);">${locationText}</td>
+        <td>
+          <button class="btn-icon" onclick="openEditAttendanceModal('${log.id}')" title="Edit Attendance">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+          </button>
+        </td>
       </tr>
     `;
   }).join('');
@@ -710,5 +731,86 @@ function initOrUpdateMap() {
     state.mapCircle.setLatLng([lat, lng]);
     state.mapCircle.setRadius(radius);
     state.map.invalidateSize();
+  }
+}
+
+// Edit Attendance Logic
+window.openEditAttendanceModal = function(empId) {
+  // Find employee attendance log
+  let att = null;
+  const emp = state.employees.find(e => e.id === empId);
+  if (emp && emp.todayAttendance) {
+    att = emp.todayAttendance;
+  } else {
+    const log = state.attendanceLogs.find(l => l.id === empId);
+    if (log) att = log;
+  }
+  
+  document.getElementById('editAttEmpId').value = empId;
+  document.getElementById('editAttDateKey').value = state.selectedDate;
+  
+  // Format to HH:mm for time input if value exists
+  const formatTimeInput = (timeStr) => {
+    if (!timeStr || timeStr === '-' || timeStr === 'Pending' || timeStr === 'N/A') return '';
+    // timeStr could be like '10:15 AM'
+    const parts = timeStr.match(/(\d+):(\d+)\s(AM|PM)/i);
+    if (parts) {
+      let h = parseInt(parts[1]);
+      let m = parts[2];
+      let ampm = parts[3].toUpperCase();
+      if (ampm === 'PM' && h < 12) h += 12;
+      if (ampm === 'AM' && h === 12) h = 0;
+      return `${h.toString().padStart(2, '0')}:${m}`;
+    }
+    return '';
+  };
+  
+  const checkInVal = att ? (att.checkInFormatted || att.checkInAt) : '';
+  const checkOutVal = att ? (att.checkOutFormatted || att.checkOutAt) : '';
+  
+  document.getElementById('editAttCheckIn').value = formatTimeInput(checkInVal);
+  document.getElementById('editAttCheckOut').value = formatTimeInput(checkOutVal);
+  
+  document.getElementById('editAttendanceModal').style.display = 'flex';
+};
+
+async function handleAttendanceEditSubmit(e) {
+  e.preventDefault();
+  const empId = document.getElementById('editAttEmpId').value;
+  const dateKey = document.getElementById('editAttDateKey').value;
+  let checkIn = document.getElementById('editAttCheckIn').value;
+  let checkOut = document.getElementById('editAttCheckOut').value;
+  
+  if (!checkIn) checkIn = '-';
+  if (!checkOut) checkOut = '-';
+
+  const btn = document.getElementById('btnSaveAttendance');
+  btn.textContent = 'Saving...';
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/attendance/edit', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        employeeId: empId,
+        dateKey: dateKey,
+        checkInTime: checkIn,
+        checkOutTime: checkOut
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById('editAttendanceModal').style.display = 'none';
+      loadAllData(); // refresh dashboard to reflect changes
+    } else {
+      alert('Failed to edit attendance: ' + data.error);
+    }
+  } catch (err) {
+    console.error('Error editing attendance:', err);
+    alert('An error occurred.');
+  } finally {
+    btn.textContent = 'Save Changes';
+    btn.disabled = false;
   }
 }

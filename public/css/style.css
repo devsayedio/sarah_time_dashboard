@@ -567,6 +567,12 @@ tbody tr:hover {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
+.badge.holiday, .badge.off-day {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-dim);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
 .badge.active {
   background: rgba(16, 185, 129, 0.15);
   color: var(--success);
@@ -680,7 +686,43 @@ input:checked + .slider:before {
   outline: none;
 }
 
-.form-group input:focus {
+.modal-overlay form input:focus, .modal-overlay form select:focus {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+/* Holiday Banner */
+.holiday-banner {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.1), rgba(245, 158, 11, 0.05));
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: var(--warning);
+  padding: 16px 24px;
+  border-radius: 16px;
+  margin-bottom: 24px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Action Icon Button */
+.btn-icon {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-icon:hover {
+  background: var(--surface-hover);
+  color: var(--primary);
   border-color: var(--primary);
 }
 

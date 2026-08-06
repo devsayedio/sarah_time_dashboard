@@ -44,6 +44,29 @@ function formatTimestamp(ts) {
   });
 }
 
+// Helper: Check if a date is a holiday or off-day
+function getHolidayStatus(dateKey, officeSettings, dateOverrides) {
+  const override = dateOverrides.find(o => o.dateKey === dateKey);
+  if (override) {
+    if (override.isOfficeOpen === false) {
+      return { isHoliday: true, reason: override.reason || 'Closed / Holiday', statusText: 'holiday' };
+    }
+    return { isHoliday: false, reason: null, statusText: null };
+  }
+  
+  const dateObj = new Date(dateKey);
+  let weekday = dateObj.getDay();
+  if (weekday === 0) weekday = 7;
+  
+  const weeklyDays = (officeSettings && officeSettings.weeklyOfficeDays) ? officeSettings.weeklyOfficeDays : [1, 2, 3, 4, 5, 6, 7];
+  
+  if (!weeklyDays.includes(weekday)) {
+    return { isHoliday: true, reason: 'Weekend / Off-Day', statusText: 'off-day' };
+  }
+  
+  return { isHoliday: false, reason: null, statusText: null };
+}
+
 // API 1: Overview Statistics
 app.get('/api/stats', async (req, res) => {
   try {
@@ -85,11 +108,20 @@ app.get('/api/stats', async (req, res) => {
       }
     }
 
-    const absentCount = Math.max(0, activeEmployees - checkedInCount);
-
     // Fetch Office Settings
     const policySnap = await db.collection('settings').doc('office').get();
     const officeSettings = policySnap.exists ? policySnap.data() : null;
+
+    const overridesSnap = await db.collection('settings').doc('office').collection('date_overrides').get();
+    const dateOverrides = [];
+    overridesSnap.forEach(doc => dateOverrides.push({ dateKey: doc.id, ...doc.data() }));
+
+    const holidayInfo = getHolidayStatus(dateKey, officeSettings, dateOverrides);
+    let absentCount = Math.max(0, activeEmployees - checkedInCount);
+    
+    if (holidayInfo.isHoliday) {
+      absentCount = 0;
+    }
 
     res.json({
       success: true,
@@ -101,7 +133,10 @@ app.get('/api/stats', async (req, res) => {
         presentCount,
         lateCount,
         checkedOutCount,
-        absentCount
+        absentCount,
+        isHoliday: holidayInfo.isHoliday,
+        holidayReason: holidayInfo.reason,
+        holidayStatusText: holidayInfo.statusText
       },
       officeSettings
     });
@@ -115,6 +150,14 @@ app.get('/api/stats', async (req, res) => {
 app.get('/api/employees', async (req, res) => {
   try {
     const dateKey = req.query.date || getDhakaDateKey();
+    
+    const policySnap = await db.collection('settings').doc('office').get();
+    const officeSettings = policySnap.exists ? policySnap.data() : null;
+    const overridesSnap = await db.collection('settings').doc('office').collection('date_overrides').get();
+    const dateOverrides = [];
+    overridesSnap.forEach(doc => dateOverrides.push({ dateKey: doc.id, ...doc.data() }));
+    const holidayInfo = getHolidayStatus(dateKey, officeSettings, dateOverrides);
+
     const employeesSnap = await db.collection('employees').get();
     const employees = [];
 
@@ -145,6 +188,12 @@ app.get('/api/employees', async (req, res) => {
           ...aData,
           checkInFormatted: formatTimestamp(aData.checkInAt),
           checkOutFormatted: formatTimestamp(aData.checkOutAt)
+        };
+      } else if (holidayInfo.isHoliday && empData.isActive !== false) {
+        attendance = {
+          status: holidayInfo.statusText,
+          checkInFormatted: '-',
+          checkOutFormatted: '-'
         };
       }
 
@@ -315,6 +364,14 @@ app.delete('/api/employees/:id', async (req, res) => {
 app.get('/api/attendance', async (req, res) => {
   try {
     const targetDate = req.query.date || getDhakaDateKey();
+    
+    const policySnap = await db.collection('settings').doc('office').get();
+    const officeSettings = policySnap.exists ? policySnap.data() : null;
+    const overridesSnap = await db.collection('settings').doc('office').collection('date_overrides').get();
+    const dateOverrides = [];
+    overridesSnap.forEach(doc => dateOverrides.push({ dateKey: doc.id, ...doc.data() }));
+    const holidayInfo = getHolidayStatus(targetDate, officeSettings, dateOverrides);
+
     const employeesSnap = await db.collection('employees').get();
     const attendanceLogs = [];
 
@@ -363,7 +420,7 @@ app.get('/api/attendance', async (req, res) => {
             designation: profile.designation || 'N/A',
             department: profile.department || 'N/A',
             dateKey: targetDate,
-            status: 'absent',
+            status: holidayInfo.isHoliday ? holidayInfo.statusText : 'absent',
             lateByMinutes: 0,
             checkInAt: '-',
             checkOutAt: '-',
@@ -377,6 +434,44 @@ app.get('/api/attendance', async (req, res) => {
     res.json({ success: true, date: targetDate, logs: attendanceLogs });
   } catch (error) {
     console.error('Error fetching attendance logs:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API 4.1: Edit Attendance
+app.put('/api/attendance/edit', async (req, res) => {
+  try {
+    const { employeeId, dateKey, checkInTime, checkOutTime } = req.body;
+    if (!employeeId || !dateKey) {
+      return res.status(400).json({ success: false, error: 'employeeId and dateKey are required' });
+    }
+
+    const createTimestamp = (timeStr) => {
+      if (!timeStr || timeStr === '-') return null;
+      const dhakaDateStr = `${dateKey}T${timeStr}:00+06:00`;
+      const dateObj = new Date(dhakaDateStr);
+      if (isNaN(dateObj.getTime())) return null;
+      return require('firebase-admin/firestore').Timestamp.fromDate(dateObj);
+    };
+
+    const updateData = {};
+    if (checkInTime && checkInTime !== '-') updateData.checkInAt = createTimestamp(checkInTime);
+    if (checkOutTime && checkOutTime !== '-') updateData.checkOutAt = createTimestamp(checkOutTime);
+    
+    if (updateData.checkInAt) {
+       updateData.status = 'present';
+    }
+
+    await db
+      .collection('employees')
+      .doc(employeeId)
+      .collection('attendance_history')
+      .doc(dateKey)
+      .set(updateData, { merge: true });
+
+    res.json({ success: true, employeeId, dateKey });
+  } catch (error) {
+    console.error('Error editing attendance:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
