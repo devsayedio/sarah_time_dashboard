@@ -39,6 +39,19 @@ function initUI() {
     loadAllData();
   });
 
+  // Expose navigateDate globally for prev/next buttons
+  window.navigateDate = function(direction) {
+    const current = new Date(state.selectedDate + 'T00:00:00');
+    current.setDate(current.getDate() + direction);
+    const yyyy = current.getFullYear();
+    const mm = String(current.getMonth() + 1).padStart(2, '0');
+    const dd = String(current.getDate()).padStart(2, '0');
+    const newDate = `${yyyy}-${mm}-${dd}`;
+    state.selectedDate = newDate;
+    document.getElementById('selectedDate').value = newDate;
+    loadAllData();
+  };
+
   document.getElementById('refreshBtn').addEventListener('click', () => {
     loadAllData();
   });
@@ -862,3 +875,41 @@ async function handleAttendanceEditSubmit(e) {
     btn.disabled = false;
   }
 }
+
+window.handleDeleteAttendance = async function() {
+  const empId = document.getElementById('editAttEmpId').value;
+  const dateKey = document.getElementById('editAttDateKey').value;
+
+  if (!empId || !dateKey) {
+    alert('Attendance data not found.');
+    return;
+  }
+
+  const confirmed = confirm('এই অ্যাটেন্ডেন্স রেকর্ডটি ডিলিট করবেন? এই কাজটি পূর্বাবস্থায় ফেরানো যাবে না।');
+  if (!confirmed) return;
+
+  const btn = document.getElementById('btnDeleteAttendance');
+  btn.textContent = 'Deleting...';
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/attendance/delete', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employeeId: empId, dateKey })
+    });
+    const data = await res.json();
+    if (data.success) {
+      closeEditAttendanceModal();
+      loadAllData();
+    } else {
+      alert('Failed to delete: ' + data.error);
+    }
+  } catch (err) {
+    console.error('Error deleting attendance:', err);
+    alert('An error occurred.');
+  } finally {
+    btn.textContent = 'Delete Record';
+    btn.disabled = false;
+  }
+};

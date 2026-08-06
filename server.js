@@ -559,6 +559,28 @@ app.put('/api/attendance/edit', async (req, res) => {
   }
 });
 
+// API: Delete Attendance Record
+app.delete('/api/attendance/delete', async (req, res) => {
+  try {
+    const { employeeId, dateKey } = req.body;
+    if (!employeeId || !dateKey) {
+      return res.status(400).json({ success: false, error: 'employeeId and dateKey are required' });
+    }
+
+    await db
+      .collection('employees')
+      .doc(employeeId)
+      .collection('attendance_history')
+      .doc(dateKey)
+      .delete();
+
+    res.json({ success: true, employeeId, dateKey });
+  } catch (error) {
+    console.error('Error deleting attendance:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // API 5: Office Settings & Date Overrides
 app.get('/api/settings/office', async (req, res) => {
   try {
