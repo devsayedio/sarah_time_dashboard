@@ -706,6 +706,25 @@ input:checked + .slider:before {
   gap: 12px;
 }
 
+/* Office open via date override: attendance stays enabled */
+.holiday-banner.open {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(16, 185, 129, 0.05));
+  border-color: rgba(16, 185, 129, 0.3);
+  color: var(--success);
+}
+
+.holiday-banner svg {
+  flex-shrink: 0;
+}
+
+.holiday-banner .banner-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
 /* Action Icon Button */
 .btn-icon {
   background: transparent;

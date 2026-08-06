@@ -44,27 +44,81 @@ function formatTimestamp(ts) {
   });
 }
 
-// Helper: Check if a date is a holiday or off-day
+// Helper: ISO weekday (Mon=1 ... Sun=7) from a YYYY-MM-DD key, timezone independent
+function getIsoWeekday(dateKey) {
+  const [year, month, day] = String(dateKey).split('-').map(Number);
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return weekday === 0 ? 7 : weekday;
+}
+
+// Helper: Check if a date is a holiday or off-day.
+// A date override always produces a notice, whether it opens or closes the office;
+// only `isOfficeOpen` decides whether attendance tracking stays enabled for that date.
 function getHolidayStatus(dateKey, officeSettings, dateOverrides) {
   const override = dateOverrides.find(o => o.dateKey === dateKey);
+
   if (override) {
-    if (override.isOfficeOpen === false) {
-      return { isHoliday: true, reason: override.reason || 'Closed / Holiday', statusText: 'holiday' };
+    const isOfficeOpen = override.isOfficeOpen !== false;
+    const reason = override.reason || (isOfficeOpen ? 'Special Working Day' : 'Closed / Holiday');
+
+    if (isOfficeOpen) {
+      return {
+        isHoliday: false,
+        reason: null,
+        statusText: null,
+        hasOverride: true,
+        isOfficeOpen: true,
+        notice: {
+          type: 'open',
+          title: 'Special Working Day (Office Open)',
+          reason,
+          attendanceEnabled: true
+        }
+      };
     }
-    return { isHoliday: false, reason: null, statusText: null };
+
+    return {
+      isHoliday: true,
+      reason,
+      statusText: 'holiday',
+      hasOverride: true,
+      isOfficeOpen: false,
+      notice: {
+        type: 'closed',
+        title: 'Closed / Holiday',
+        reason,
+        attendanceEnabled: false
+      }
+    };
   }
-  
-  const dateObj = new Date(dateKey);
-  let weekday = dateObj.getDay();
-  if (weekday === 0) weekday = 7;
-  
+
+  const weekday = getIsoWeekday(dateKey);
   const weeklyDays = (officeSettings && officeSettings.weeklyOfficeDays) ? officeSettings.weeklyOfficeDays : [1, 2, 3, 4, 5, 6, 7];
-  
+
   if (!weeklyDays.includes(weekday)) {
-    return { isHoliday: true, reason: 'Weekend / Off-Day', statusText: 'off-day' };
+    return {
+      isHoliday: true,
+      reason: 'Weekend / Off-Day',
+      statusText: 'off-day',
+      hasOverride: false,
+      isOfficeOpen: false,
+      notice: {
+        type: 'off-day',
+        title: 'Weekend / Off-Day',
+        reason: 'Regular weekly off-day',
+        attendanceEnabled: false
+      }
+    };
   }
-  
-  return { isHoliday: false, reason: null, statusText: null };
+
+  return {
+    isHoliday: false,
+    reason: null,
+    statusText: null,
+    hasOverride: false,
+    isOfficeOpen: true,
+    notice: null
+  };
 }
 
 // API 1: Overview Statistics
@@ -136,7 +190,11 @@ app.get('/api/stats', async (req, res) => {
         absentCount,
         isHoliday: holidayInfo.isHoliday,
         holidayReason: holidayInfo.reason,
-        holidayStatusText: holidayInfo.statusText
+        holidayStatusText: holidayInfo.statusText,
+        hasDateOverride: holidayInfo.hasOverride,
+        isOfficeOpen: holidayInfo.isOfficeOpen,
+        attendanceEnabled: !holidayInfo.isHoliday,
+        notice: holidayInfo.notice
       },
       officeSettings
     });

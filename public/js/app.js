@@ -155,17 +155,55 @@ async function fetchStats() {
   }
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+}
+
+// Renders the office-status notice. Any date override shows a notice — open or closed;
+// only the open/closed value changes whether attendance tracking is enabled.
+function renderOfficeNotice() {
+  const notice = state.stats ? state.stats.notice : null;
+  const banners = ['holidayBanner', 'attendanceBanner']
+    .map(id => document.getElementById(id))
+    .filter(Boolean);
+
+  if (!notice) {
+    banners.forEach(banner => { banner.style.display = 'none'; });
+    const banner = document.getElementById('holidayBanner');
+    if (state.stats.isHoliday || state.stats.holidayReason) {
+      banner.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"></path><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg> <span>Office Status: <strong>${state.stats.holidayReason || state.stats.holidayStatusText}</strong></span>`;
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+    return;
+  }
+
+  const icon = notice.type === 'open'
+    ? `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>`
+    : `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"></path><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>`;
+
+  const detail = notice.reason && notice.reason !== notice.title
+    ? ` &mdash; ${escapeHtml(notice.reason)}`
+    : '';
+  const attendanceNote = notice.attendanceEnabled
+    ? 'Attendance tracking enabled'
+    : 'Attendance tracking disabled';
+
+  banners.forEach(banner => {
+    banner.className = `holiday-banner ${notice.type === 'open' ? 'open' : 'closed'}`;
+    banner.innerHTML = `${icon}<span>Office Status: <strong>${escapeHtml(notice.title)}</strong>${detail}<small class="banner-note">${attendanceNote}</small></span>`;
+    banner.style.display = 'flex';
+  });
+}
+
 function renderStatsCards() {
   if (!state.stats) return;
-  
-  const banner = document.getElementById('holidayBanner');
-  if (state.stats.isHoliday) {
-    banner.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20"></path><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg> <span>Office Status: <strong>${state.stats.holidayReason || state.stats.holidayStatusText}</strong></span>`;
-    banner.style.display = 'flex';
-  } else {
-    banner.style.display = 'none';
-  }
-  
+
+  renderOfficeNotice();
+
   document.getElementById('statTotalEmployees').textContent = state.stats.activeEmployees;
   document.getElementById('statPresent').textContent = state.stats.presentCount;
   document.getElementById('statLate').textContent = state.stats.lateCount;
