@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sarah Time - Employee Attendance Admin Dashboard</title>
+  
+  <!-- CSS & Fonts -->
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⏱️</text></svg>">
+</head>
+<body>
+  <!-- Global Loader -->
+  <div id="globalLoader">
+    <div class="spinner"></div>
+    <p style="color: var(--text-muted); font-size: 14px; font-weight: 500;">Loading data...</p>
+  </div>
+
+  <!-- Sidebar Navigation -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">ST</div>
+      <div class="brand-text">
+        <h1>Sarah Time</h1>
+        <p>Admin Dashboard</p>
+      </div>
+    </div>
+
+    <ul class="nav-menu">
+      <li class="nav-item active" data-tab="dashboard">
+        <button>
+          <svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+          Overview
+        </button>
+      </li>
+      <li class="nav-item" data-tab="attendance">
+        <button>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          Attendance Log
+        </button>
+      </li>
+      <li class="nav-item" data-tab="employees">
+        <button>
+          <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+          Employee Directory
+        </button>
+      </li>
+      <li class="nav-item" data-tab="settings">
+        <button>
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          Office & Policy
+        </button>
+      </li>
+    </ul>
+
+    <div class="sidebar-footer">
+      <p>Sarah Time Admin v1.0</p>      <p style="margin-top:4px; font-size:11px; opacity:0.7;">Dhaka Time (Asia/Dhaka)</p>
+    </div>
+  </aside>
+
+  <!-- Main Workspace -->
+  <main class="main-wrapper">
+
+    <!-- Top Header -->
+    <header class="top-bar">
+      <div class="page-title">
+        <h2 id="currentTabTitle">Dashboard Overview</h2>
+        <p id="currentTabSub">Live attendance monitoring and management</p>
+      </div>
+
+      <div class="top-actions">
+        <button class="btn-secondary" id="themeToggleBtn" style="margin-right: 8px;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+          Theme
+        </button>
+        <div class="date-picker-box">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+          <input type="date" id="selectedDate">
+        </div>
+        <button class="btn-primary" id="refreshBtn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          Refresh Data
+        </button>
+      </div>
+    </header>
+
+    <!-- Tab Page 1: Dashboard Overview -->
+    <section id="tab-dashboard" class="tab-page active">
+      <div class="stats-grid">
+        <div class="stat-card blue">
+          <div class="stat-info">
+            <span>Total Employees</span>
+            <h3 id="statTotalEmployees">0</h3>
+          </div>
+          <div class="stat-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle></svg>
+          </div>
+        </div>
+
+        <div class="stat-card green">
+          <div class="stat-info">
+            <span>Present Today</span>
+            <h3 id="statPresent">0</h3>
+          </div>
+          <div class="stat-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+          </div>
+        </div>
+
+        <div class="stat-card amber">
+          <div class="stat-info">
+            <span>Late Check-in</span>
+            <h3 id="statLate">0</h3>
+          </div>
+          <div class="stat-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          </div>
+        </div>
+
+        <div class="stat-card red">
+          <div class="stat-info">
+            <span>Absent Today</span>
+            <h3 id="statAbsent">0</h3>
+          </div>
+          <div class="stat-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Summary Table -->
+      <div class="content-card">
+        <div class="card-header">
+          <h3>Today's Attendance Summary</h3>
+          <div class="search-filter-box">
+            <input type="text" id="dashSearchInput" class="search-input" placeholder="Search employee...">
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Employee</th>
+                <th>Designation</th>
+                <th>Check-In</th>
+                <th>Check-Out</th>
+                <th>Status</th>
+                <th>Late (Min)</th>
+              </tr>
+            </thead>
+            <tbody id="dashSummaryTable">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab Page 2: Full Attendance Log -->
+    <section id="tab-attendance" class="tab-page">
+      <div class="content-card">
+        <div class="card-header">
+          <h3>Daily Attendance Records</h3>
+          <div class="search-filter-box">
+            <input type="text" id="attSearchInput" class="search-input" placeholder="Search by name or code...">
+            <select id="attStatusFilter" class="select-input">
+              <option value="all">All Status</option>
+              <option value="present">Present</option>
+              <option value="late">Late</option>
+              <option value="absent">Absent</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Employee Name</th>
+                <th>ID</th>
+                <th>Department</th>
+                <th>Check-In Time</th>
+                <th>Check-Out Time</th>
+                <th>Status</th>
+                <th>Address / Location</th>
+              </tr>
+            </thead>
+            <tbody id="fullAttendanceTable">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab Page 3: Employee Directory -->
+    <section id="tab-employees" class="tab-page">
+      <div class="content-card">
+        <div class="card-header">
+          <h3>Employee Directory</h3>
+          <div style="display: flex; gap: 12px; align-items: center;">
+            <div class="search-container">
+              <svg class="search-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+              <input type="text" class="search-input" id="empSearchInput" placeholder="Search employees...">
+            </div>
+            <button class="btn-primary" onclick="openAddEmployee()" style="display: inline-flex;">+ Add Employee</button>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Employee</th>
+                <th>Employee Code</th>
+                <th>Official Email</th>
+                <th>Department</th>
+                <th>Active Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="employeeDirectoryTable">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab Page 4: Office Policy & Geofence Settings -->
+    <section id="tab-settings" class="tab-page">
+      <div class="settings-grid">
+        <div class="content-card">
+          <div class="card-header">
+            <h3>Office Policy & Geofence</h3>
+          </div>
+          <form id="officePolicyForm">
+            <div class="form-group">
+              <label>Office Latitude</label>
+              <input type="number" step="any" id="settingLat" required>
+            </div>
+            <div class="form-group">
+              <label>Office Longitude</label>
+              <input type="number" step="any" id="settingLng" required>
+            </div>
+            <div class="form-group">
+              <label>Allowed Geofence Radius (Meters)</label>
+              <input type="number" id="settingRadius" required>
+            </div>
+            <div style="display:flex; gap:16px;">
+              <div class="form-group" style="flex:1;">
+                <label>Start Time (HH:MM)</label>
+                <input type="text" id="settingStart" placeholder="09:30" required>
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>End Time (HH:MM)</label>
+                <input type="text" id="settingEnd" placeholder="18:00" required>
+              </div>
+            </div>
+            <div style="display:flex; gap:16px;">
+              <div class="form-group" style="flex:1;">
+                <label>Late Threshold (Minutes)</label>
+                <input type="number" id="settingLate" required>
+              </div>
+              <div class="form-group" style="flex:1;">
+                <label>Check-in Window Opens Before (Min)</label>
+                <input type="number" id="settingCheckinOpen" required>
+              </div>
+            </div>
+
+            <button type="submit" class="btn-primary" style="margin-top:16px; width:100%; justify-content:center;">
+              Save Policy Changes
+            </button>
+          </form>
+
+          <div id="map"></div>
+        </div>
+
+        <div class="content-card">
+          <div class="card-header">
+            <h3>Date Overrides (Holidays / Special Days)</h3>
+          </div>
+          <form id="dateOverrideForm" style="margin-bottom: 24px;">
+            <div class="form-group">
+              <label>Override Date Key (YYYY-MM-DD)</label>
+              <input type="date" id="overrideDateKey" required>
+            </div>
+            <div class="form-group">
+              <label>Office Status</label>
+              <select id="overrideStatus" class="select-input">
+                <option value="false">Closed / Holiday</option>
+                <option value="true">Open / Special Workday</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Reason</label>
+              <input type="text" id="overrideReason" placeholder="e.g. National Holiday" required>
+            </div>
+            <button type="submit" class="btn-secondary" style="width:100%;">Add Date Override</button>
+          </form>
+
+          <div class="table-responsive">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Office State</th>
+                  <th>Reason</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="overrideTableBody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab Page 5: Employee Edit (Hidden by default, opened via View Profile) -->
+    <section id="tab-employee-edit" class="tab-page">
+      <div class="content-card">
+        <div class="card-header">
+          <button class="btn-secondary" onclick="switchTab('employees')" style="padding: 6px 12px; margin-right: 16px;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: middle; margin-right: 4px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+            Back
+          </button>
+          <h3 id="editEmpHeaderTitle">Employee Details</h3>
+          <div class="top-actions">
+            <button class="btn-secondary" id="btnEditEmployeeToggle" type="button" style="color: var(--primary); border-color: rgba(99, 102, 241, 0.3); margin-right: 8px;">
+              Edit Profile
+            </button>
+            <button class="btn-secondary" id="btnDeleteEmployee" type="button" style="color: var(--danger); border-color: rgba(239, 68, 68, 0.3);">
+              Delete Employee
+            </button>
+          </div>
+        </div>
+
+        <div style="text-align: center; margin-bottom: 24px;">
+          <img id="editEmpImage" src="" alt="Profile" style="width: 100px; height: 100px; border-radius: 50%; object-fit: cover; border: 2px solid var(--border); display: none;">
+        </div>
+        
+        <form id="employeeEditForm">
+          <input type="hidden" id="editEmpUid">
+          
+          <div class="settings-grid">
+            <!-- Personal Info -->
+            <div>
+              <h4 style="margin-bottom: 16px; color: var(--primary);">Personal Information</h4>
+              <div class="form-group">
+                <label>Full Name</label>
+                <input type="text" id="editEmpName" required>
+              </div>
+              <div class="form-group">
+                <label>Phone Number</label>
+                <input type="text" id="editEmpPhone">
+              </div>
+              <div class="form-group">
+                <label>Personal Email</label>
+                <input type="email" id="editEmpPersonalEmail">
+              </div>
+              <div class="form-group">
+                <label>NID / Passport</label>
+                <input type="text" id="editEmpNid">
+              </div>
+              <div class="form-group">
+                <label>Present Address</label>
+                <input type="text" id="editEmpPresentAddress">
+              </div>
+              <div class="form-group">
+                <label>Permanent Address</label>
+                <input type="text" id="editEmpPermanentAddress">
+              </div>
+            </div>
+
+            <!-- Job Info -->
+            <div>
+              <h4 style="margin-bottom: 16px; color: var(--primary);">Employment Details</h4>
+              <div class="form-group">
+                <label>Employee ID</label>
+                <input type="text" id="editEmpId" required>
+              </div>
+              <div class="form-group">
+                <label>Designation</label>
+                <input type="text" id="editEmpDesignation">
+              </div>
+              <div class="form-group">
+                <label>Department</label>
+                <input type="text" id="editEmpDepartment">
+              </div>
+              <div class="form-group">
+                <label>Employment Type</label>
+                <input type="text" id="editEmpType">
+              </div>
+              <div class="form-group">
+                <label>Official Email</label>
+                <input type="email" id="editEmpOfficialEmail">
+              </div>
+              <div class="form-group">
+                <label>Salary Info</label>
+                <input type="text" id="editEmpSalary">
+              </div>
+            </div>
+
+            <!-- Other Info -->
+            <div>
+              <h4 style="margin-bottom: 16px; color: var(--primary);">Emergency & Bank</h4>
+              <div class="form-group">
+                <label>Emergency Contact Name</label>
+                <input type="text" id="editEmpEmergencyName">
+              </div>
+              <div class="form-group">
+                <label>Emergency Contact Number</label>
+                <input type="text" id="editEmpEmergencyPhone">
+              </div>
+              <div class="form-group">
+                <label>Relationship</label>
+                <input type="text" id="editEmpEmergencyRelation">
+              </div>
+              <div class="form-group">
+                <label>Bank Account Info</label>
+                <input type="text" id="editEmpBankAccount">
+              </div>
+            </div>
+          </div>
+          
+          <div style="margin-top: 24px; text-align: right;">
+            <button type="submit" id="btnSaveEmployee" class="btn-primary" style="display: none;">Save Changes</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Scripts -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
