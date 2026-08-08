@@ -8,6 +8,8 @@ let state = {
   attendanceLogs: [],
   officeSettings: null,
   dateOverrides: [],
+  dashboardDate: null,
+  settingsLoaded: false,
   map: null,
   mapMarker: null,
   mapCircle: null
@@ -26,7 +28,7 @@ function getTodayDhakaDate() {
 
 document.addEventListener('DOMContentLoaded', () => {
   initUI();
-  loadAllData();
+  loadDashboardData();
 });
 
 function initUI() {
@@ -36,7 +38,10 @@ function initUI() {
 
   dateInput.addEventListener('change', (e) => {
     state.selectedDate = e.target.value;
-    loadAllData();
+    state.dashboardDate = null;
+    if (state.currentTab === 'dashboard' || state.currentTab === 'attendance') {
+      loadDashboardData();
+    }
   });
 
   // Expose navigateDate globally for prev/next buttons
@@ -49,12 +54,20 @@ function initUI() {
     const newDate = `${yyyy}-${mm}-${dd}`;
     state.selectedDate = newDate;
     document.getElementById('selectedDate').value = newDate;
-    loadAllData();
+    state.dashboardDate = null;
+    if (state.currentTab === 'dashboard' || state.currentTab === 'attendance') {
+      loadDashboardData();
+    }
   };
 
   document.getElementById('refreshBtn').addEventListener('click', () => {
-    loadAllData();
-    if (state.currentTab === 'notifications') loadNotificationsData();
+    if (state.currentTab === 'settings') {
+      fetchSettings({ force: true });
+    } else if (state.currentTab === 'notifications') {
+      loadNotificationsData({ force: true });
+    } else {
+      loadDashboardData({ force: true });
+    }
   });
 
   // Tab Navigation Setup
@@ -129,12 +142,21 @@ function switchTab(tabName) {
   }
 
   if (tabName === 'settings') {
-    setTimeout(initOrUpdateMap, 200);
+    if (!state.settingsLoaded) {
+      fetchSettings();
+    } else {
+      setTimeout(initOrUpdateMap, 200);
+    }
   }
 
   if (tabName === 'notifications') {
     renderNotifRecipientSummary();
     loadNotificationsData();
+  }
+
+  if ((tabName === 'dashboard' || tabName === 'attendance') &&
+      state.dashboardDate !== state.selectedDate) {
+    loadDashboardData();
   }
 }
 
@@ -158,27 +180,30 @@ function setBtnLoading(btnId, isLoading) {
   }
 }
 
-async function loadAllData() {
+async function loadDashboardData({ force = false } = {}) {
+  if (!force && state.dashboardDate === state.selectedDate) return;
   showLoader();
-  await Promise.all([
-    fetchStats(),
-    fetchEmployees(),
-    fetchAttendanceLogs(),
-    fetchSettings()
-  ]);
-  hideLoader();
-}
-
-async function fetchStats() {
   try {
-    const res = await fetch(`/api/stats?date=${state.selectedDate}`);
+    const res = await fetch(`/api/dashboard?date=${state.selectedDate}`);
     const data = await res.json();
     if (data.success) {
       state.stats = data.stats;
+      state.employees = data.employees;
+      state.attendanceLogs = data.logs;
+      state.officeSettings = data.officeSettings;
+      state.dashboardDate = data.dateKey;
       renderStatsCards();
+      renderDashSummary();
+      renderEmployeeDirectory();
+      renderAttendanceLogs();
+      renderNotifRecipientSummary();
+    } else {
+      console.error('Dashboard request failed:', data.error);
     }
   } catch (err) {
-    console.error('Error fetching stats:', err);
+    console.error('Error fetching dashboard:', err);
+  } finally {
+    hideLoader();
   }
 }
 
@@ -237,47 +262,24 @@ function renderStatsCards() {
   document.getElementById('statAbsent').textContent = state.stats.absentCount;
 }
 
-async function fetchEmployees() {
-  try {
-    const res = await fetch(`/api/employees?date=${state.selectedDate}`);
-    const data = await res.json();
-    if (data.success) {
-      state.employees = data.employees;
-      renderDashSummary();
-      renderEmployeeDirectory();
-      renderNotifRecipientSummary();
-    }
-  } catch (err) {
-    console.error('Error fetching employees:', err);
-  }
-}
-
-async function fetchAttendanceLogs() {
-  try {
-    const res = await fetch(`/api/attendance?date=${state.selectedDate}`);
-    const data = await res.json();
-    if (data.success) {
-      state.attendanceLogs = data.logs;
-      renderAttendanceLogs();
-    }
-  } catch (err) {
-    console.error('Error fetching attendance logs:', err);
-  }
-}
-
-async function fetchSettings() {
+async function fetchSettings({ force = false } = {}) {
+  if (!force && state.settingsLoaded) return;
+  showLoader();
   try {
     const res = await fetch('/api/settings/office');
     const data = await res.json();
     if (data.success) {
       state.officeSettings = data.settings;
       state.dateOverrides = data.dateOverrides;
+      state.settingsLoaded = true;
       populateSettingsForm();
       renderDateOverrides();
       initOrUpdateMap();
     }
   } catch (err) {
     console.error('Error fetching settings:', err);
+  } finally {
+    hideLoader();
   }
 }
 
@@ -436,7 +438,7 @@ async function toggleEmployeeActive(empId, isChecked) {
     });
     const data = await res.json();
     if (data.success) {
-      loadAllData();
+      await loadDashboardData({ force: true });
     }
   } catch (err) {
     console.error('Error toggling active state:', err);
@@ -629,7 +631,7 @@ async function handleEmployeeUpdate(e) {
     const data = await res.json();
     if (data.success) {
       alert(isNewEmployee ? 'Employee added successfully with default password "123456"' : 'Employee details updated successfully.');
-      await loadAllData();
+      await loadDashboardData({ force: true });
       switchTab('employees');
     } else {
       alert('Failed to save: ' + data.error);
@@ -659,7 +661,7 @@ async function handleEmployeeDelete() {
     const data = await res.json();
     if (data.success) {
       alert('Employee deleted successfully.');
-      await loadAllData();
+      await loadDashboardData({ force: true });
       switchTab('employees');
     } else {
       alert('Failed to delete: ' + data.error);
@@ -736,7 +738,8 @@ async function handlePolicySubmit(e) {
     const data = await res.json();
     if (data.success) {
       alert('Office policy updated successfully!');
-      fetchSettings();
+      state.dashboardDate = null;
+      fetchSettings({ force: true });
     }
   } catch (err) {
     console.error('Error saving policy:', err);
@@ -760,7 +763,8 @@ async function handleOverrideSubmit(e) {
     const data = await res.json();
     if (data.success) {
       document.getElementById('dateOverrideForm').reset();
-      fetchSettings();
+      state.dashboardDate = null;
+      fetchSettings({ force: true });
     }
   } catch (err) {
     console.error('Error adding override:', err);
@@ -783,7 +787,8 @@ async function deleteDateOverride(dateKey) {
     });
     const data = await res.json();
     if (data.success) {
-      fetchSettings();
+      state.dashboardDate = null;
+      fetchSettings({ force: true });
     }
   } catch (err) {
     console.error('Error deleting override:', err);
@@ -898,7 +903,7 @@ async function handleAttendanceEditSubmit(e) {
     const data = await res.json();
     if (data.success) {
       closeEditAttendanceModal();
-      loadAllData(); // refresh dashboard to reflect changes
+      loadDashboardData({ force: true });
     } else {
       alert('Failed to edit attendance: ' + data.error);
     }
@@ -936,7 +941,7 @@ window.handleDeleteAttendance = async function() {
     const data = await res.json();
     if (data.success) {
       closeEditAttendanceModal();
-      loadAllData();
+      loadDashboardData({ force: true });
     } else {
       alert('Failed to delete: ' + data.error);
     }
@@ -1094,7 +1099,8 @@ const notifState = {
   scheduled: [],
   scheduledSelection: new Set(),
   detailLogId: null,
-  searchDebounce: null
+  searchDebounce: null,
+  loaded: false
 };
 
 // ─── Formatting helpers (mirror NotificationLogModel getters) ─────────
@@ -1237,7 +1243,7 @@ function createRecipientPicker(ids, onChange) {
 
     picker.results.innerHTML = matches.map(emp => {
       const name = employeeDisplayName(emp);
-      const noDevice = !emp.fcmToken
+      const noDevice = !emp.hasFcmToken
         ? `<span class="badge failed" style="font-size:10px; padding:2px 8px;">No device</span>`
         : '';
       const inactive = !emp.isActive
@@ -1444,9 +1450,13 @@ function switchNotifSubTab(subTabName) {
   document.getElementById(`subtab-${subTabName}`)?.classList.add('active');
 }
 
-function loadNotificationsData() {
-  fetchNotificationHistory();
-  fetchScheduledNotifications();
+async function loadNotificationsData({ force = false } = {}) {
+  if (!force && notifState.loaded) return;
+  await Promise.all([
+    fetchNotificationHistory(),
+    fetchScheduledNotifications()
+  ]);
+  notifState.loaded = true;
 }
 
 // Shows how many employees a broadcast can actually reach.
@@ -1454,7 +1464,7 @@ function renderNotifRecipientSummary() {
   const summary = document.getElementById('notifReachSummary');
   if (!summary) return;
   const active = state.employees.filter(emp => emp.isActive);
-  const reachable = active.filter(emp => emp.fcmToken);
+  const reachable = active.filter(emp => emp.hasFcmToken);
   summary.textContent = `${reachable.length} of ${active.length} active employees have a registered device`;
 }
 
@@ -1940,4 +1950,3 @@ async function runDueScheduledNotifications() {
     setBtnLoading('btnRunScheduled', false);
   }
 }
-

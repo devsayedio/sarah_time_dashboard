@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "check": "node --check server.js && node --check public/js/app.js && node --check scripts/migrate-firestore-schema.js",
+    "migrate:firestore:dry-run": "node scripts/migrate-firestore-schema.js",
+    "migrate:firestore": "node scripts/migrate-firestore-schema.js --apply"
   },
   "keywords": [],
   "author": "",

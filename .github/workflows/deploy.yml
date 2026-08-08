@@ -1,0 +1,340 @@
+name: Deploy Dashboard to CloudPanel
+
+on:
+  push:
+    branches:
+      - deployment
+  workflow_dispatch:
+    inputs:
+      skip_health_check:
+        description: "Skip the post-deploy health check (emergency use only)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# Two deploys must never rsync into the same htdocs at once.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22"
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '150.230.239.107' }}
+  DEPLOY_USER: ${{ vars.DEPLOY_USER || 'sarah-time-dashboard' }}
+  DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+  DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/sarah-time-dashboard/htdocs/sarah-time-dashboard.royalcourtbd.com' }}
+  SYSTEMD_SERVICE: ${{ vars.SYSTEMD_SERVICE || 'sarah-time-dashboard.service' }}
+  APP_PORT: ${{ vars.APP_PORT || '3001' }}
+  DASHBOARD_URL: ${{ vars.DASHBOARD_URL || 'https://sarah-time-dashboard.royalcourtbd.com/' }}
+  KEEP_BACKUPS: "5"
+
+jobs:
+  #=============================================================
+  # SINGLE JOB: VALIDATE -> RSYNC -> npm ci -> SYSTEMD RESTART -> HEALTH CHECK
+  #=============================================================
+
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    steps:
+      #---------------------------------------------------
+      # TIMING
+      #---------------------------------------------------
+
+      - name: Record start time
+        id: start_time
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      #---------------------------------------------------
+      # CHECKOUT SOURCE CODE
+      #---------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      #---------------------------------------------------
+      # VALIDATE BEFORE TOUCHING THE SERVER
+      #---------------------------------------------------
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: npm run check --if-present
+
+      #---------------------------------------------------
+      # SSH SETUP
+      #---------------------------------------------------
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            # Trust-on-first-use fallback. Set DEPLOY_KNOWN_HOSTS to pin the host key.
+            echo "::warning::DEPLOY_KNOWN_HOSTS is not set - falling back to ssh-keyscan"
+            ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Verify SSH connection
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" \
+            -o StrictHostKeyChecking=yes -o BatchMode=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" "echo Connected as \$(whoami) on \$(hostname)"
+
+      #---------------------------------------------------
+      # BACKUP CURRENT RELEASE (ROLLBACK SAFETY NET)
+      #---------------------------------------------------
+
+      - name: Back up current release
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<EOF
+          set -euo pipefail
+          DEPLOY_PATH="$DEPLOY_PATH"
+          KEEP_BACKUPS="$KEEP_BACKUPS"
+          SHA="${GITHUB_SHA::7}"
+
+          BACKUP_DIR="\$HOME/backups/deploys"
+          mkdir -p "\$BACKUP_DIR"
+          STAMP=\$(TZ='Asia/Dhaka' date +'%Y%m%d-%H%M%S')
+
+          tar czf "\$BACKUP_DIR/\$STAMP-\$SHA.tar.gz" \
+            -C "\$DEPLOY_PATH" \
+            --exclude=node_modules --exclude=.well-known \
+            . 2>/dev/null
+
+          echo "Backup: \$BACKUP_DIR/\$STAMP-\$SHA.tar.gz"
+
+          # Keep only the newest N backups.
+          ls -1t "\$BACKUP_DIR"/*.tar.gz 2>/dev/null | tail -n +\$((KEEP_BACKUPS + 1)) | xargs -r rm -f
+          EOF
+
+      #---------------------------------------------------
+      # SYNC CODE
+      #
+      # service-account.json and .env live only on the server. rsync --delete
+      # never removes excluded paths, so they survive every deploy.
+      #---------------------------------------------------
+
+      - name: Rsync application files
+        run: |
+          set -euo pipefail
+          rsync -az --delete --human-readable --stats \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.claude/' \
+            --exclude='.ai/' \
+            --exclude='node_modules/' \
+            --exclude='.well-known/' \
+            --exclude='service-account.json' \
+            --exclude='.env' \
+            --exclude='public/app-release.apk' \
+            --exclude='.DS_Store' \
+            -e "ssh -i ~/.ssh/deploy_key -p $DEPLOY_PORT -o StrictHostKeyChecking=yes" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+
+      #---------------------------------------------------
+      # INSTALL DEPENDENCIES & RESTART SYSTEMD USER SERVICE
+      #
+      # The scheduled-notification worker must run in exactly one process, so
+      # only the existing systemd user service is restarted. The workflow must
+      # never start a second Node.js process as a fallback.
+      #---------------------------------------------------
+
+      - name: Install dependencies and restart app
+        id: restart
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" bash -s <<EOF
+          set -euo pipefail
+          DEPLOY_PATH="$DEPLOY_PATH"
+          SYSTEMD_SERVICE="$SYSTEMD_SERVICE"
+
+          # Non-interactive SSH does not source .bashrc, so nvm's node is not on PATH.
+          export NVM_DIR="\$HOME/.nvm"
+          [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+
+          cd "\$DEPLOY_PATH"
+          echo "node \$(node -v) / npm \$(npm -v)"
+
+          if [ ! -f service-account.json ]; then
+            echo "::error::service-account.json missing on the server - the app cannot boot"
+            exit 1
+          fi
+
+          npm ci --omit=dev --no-audit --no-fund
+
+          if ! systemctl --user cat "\$SYSTEMD_SERVICE" > /dev/null 2>&1; then
+            echo "::error::systemd user service not found: \$SYSTEMD_SERVICE"
+            exit 1
+          fi
+
+          systemctl --user restart "\$SYSTEMD_SERVICE"
+          systemctl --user is-active --quiet "\$SYSTEMD_SERVICE"
+          systemctl --user --no-pager --full status "\$SYSTEMD_SERVICE"
+          EOF
+
+      #---------------------------------------------------
+      # HEALTH CHECK
+      #---------------------------------------------------
+
+      - name: Health check
+        if: ${{ github.event.inputs.skip_health_check != 'true' }}
+        run: |
+          set -euo pipefail
+          echo "Probing Node.js service on 127.0.0.1:$APP_PORT over SSH"
+          for attempt in $(seq 1 10); do
+            if ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" \
+              -o StrictHostKeyChecking=yes -o BatchMode=yes \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "curl -fsS --max-time 10 http://127.0.0.1:$APP_PORT/ > /dev/null"; then
+              echo "Healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            echo "Attempt ${attempt} failed, retrying in 3s..."
+            sleep 3
+          done
+          echo "::error::Health check never passed for $SYSTEMD_SERVICE on port $APP_PORT"
+          exit 1
+
+      - name: Dump systemd logs on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" -o StrictHostKeyChecking=yes \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "journalctl --user-unit='$SYSTEMD_SERVICE' --no-pager -n 60" || true
+
+      #---------------------------------------------------
+      # REPORTING
+      #---------------------------------------------------
+
+      - name: Calculate deploy duration
+        if: always()
+        id: duration
+        run: |
+          END_TIME=$(date +%s)
+          START_TIME=${{ steps.start_time.outputs.start }}
+          DURATION=$((END_TIME - START_TIME))
+          echo "time=$((DURATION / 60))m $((DURATION % 60))s" >> $GITHUB_OUTPUT
+
+      - name: Format deploy date
+        if: always()
+        id: deploy_date
+        run: |
+          DEPLOY_DATE=$(TZ='Asia/Dhaka' date +'%d %B %Y - %l:%M%p' | sed 's/AM/am/g; s/PM/pm/g; s/  / /g')
+          echo "DEPLOY_DATE=$DEPLOY_DATE" >> $GITHUB_OUTPUT
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### ${{ job.status == 'success' && '✅ Deploy succeeded' || '❌ Deploy failed' }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| URL | ${{ env.DASHBOARD_URL }} |"
+            echo "| Commit | \`${GITHUB_SHA::7}\` — ${{ github.event.head_commit.message || 'manual run' }} |"
+            echo "| Duration | ${{ steps.duration.outputs.time }} |"
+            echo "| Triggered by | ${{ github.actor }} |"
+          } >> $GITHUB_STEP_SUMMARY
+
+      #---------------------------------------------------
+      # SLACK NOTIFICATION (skipped when the webhook is unset)
+      #---------------------------------------------------
+
+      - name: Notify Slack
+        if: ${{ always() && env.SLACK_WEBHOOK_URL != '' }}
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ job.status == 'success' && '✅ Sarah Time Dashboard Deployed' || '❌ Sarah Time Dashboard Deploy Failed' }}",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Commit:*\n`${{ github.sha }}`"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Duration:*\n`${{ steps.duration.outputs.time || 'N/A' }}`"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status:*\n`${{ job.status }}`"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Triggered by:*\n`${{ github.actor }}`"
+                    }
+                  ]
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Deploy Date: ${{ steps.deploy_date.outputs.DEPLOY_DATE || 'N/A' }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "Open Dashboard",
+                        "emoji": true
+                      },
+                      "url": "https://sarah-time-dashboard.royalcourtbd.com/",
+                      "style": "primary"
+                    }
+                  ]
+                }
+              ]
+            }

@@ -16,6 +16,8 @@ initializeApp({
 const db = getFirestore();
 const app = express();
 const PORT = process.env.PORT || 3000;
+const EMPLOYEES = 'employees';
+const ATTENDANCE = 'attendance';
 
 // The Flutter app parses every profile field with a strict `String` check and
 // `joiningDate` as a `Timestamp`. A missing field throws a FormatException and
@@ -67,6 +69,12 @@ function toJoiningTimestamp(value) {
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Deployment health probe. The CI pipeline polls this after restarting PM2 and
+// fails the run if it never turns healthy, so keep it free of Firestore calls.
+app.get('/healthz', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
 
 // Helper: Get Dhaka Date Key (YYYY-MM-DD)
 function getDhakaDateKey(date = new Date()) {
@@ -169,82 +177,165 @@ function getHolidayStatus(dateKey, officeSettings, dateOverrides) {
   };
 }
 
+function employeeProfile(employeeData) {
+  const profile = {};
+  for (const field of PROFILE_STRING_FIELDS) {
+    profile[field] = toProfileString(employeeData[field]);
+  }
+  profile.joiningDate = toDateInputValue(employeeData.joiningDate);
+  return profile;
+}
+
+function attendanceForDashboard(data) {
+  if (!data) return null;
+  return {
+    ...data,
+    checkInFormatted: formatTimestamp(data.checkInAt),
+    checkOutFormatted: formatTimestamp(data.checkOutAt)
+  };
+}
+
+function attendanceLog(employeeId, employeeData, dateKey, attendance, holidayInfo) {
+  const isActive = employeeData.isActive !== false;
+  if (!attendance && !isActive) return null;
+
+  return {
+    id: employeeId,
+    employeeName: employeeData.employeeName || employeeData.authEmail || 'Unknown',
+    employeeCode: employeeData.employeeId || employeeData.employeeCode || employeeId,
+    designation: employeeData.designation || 'N/A',
+    department: employeeData.department || 'N/A',
+    dateKey,
+    status: attendance?.status || (holidayInfo.isHoliday ? holidayInfo.statusText : 'absent'),
+    lateByMinutes: attendance?.lateByMinutes || 0,
+    checkInAt: attendance?.checkInAt ? formatTimestamp(attendance.checkInAt) : '-',
+    checkOutAt: attendance?.checkOutAt ? formatTimestamp(attendance.checkOutAt) : (attendance ? 'Pending' : '-'),
+    checkInLocation: attendance?.checkInLocation || null,
+    checkOutLocation: attendance?.checkOutLocation || null
+  };
+}
+
+async function loadDailyDashboard(dateKey) {
+  const policyReference = db.collection('settings').doc('office');
+  const overrideReference = policyReference.collection('date_overrides').doc(dateKey);
+  const [policySnap, overrideSnap, employeesSnap] = await Promise.all([
+    policyReference.get(),
+    overrideReference.get(),
+    db.collection(EMPLOYEES).get()
+  ]);
+
+  const officeSettings = policySnap.exists ? policySnap.data() : null;
+  const dateOverrides = overrideSnap.exists
+    ? [{ dateKey: overrideSnap.id, ...overrideSnap.data() }]
+    : [];
+  const holidayInfo = getHolidayStatus(dateKey, officeSettings, dateOverrides);
+  const attendanceByEmployeeId = new Map();
+
+  if (holidayInfo.isOfficeOpen) {
+    const attendanceSnap = await db
+      .collection(ATTENDANCE)
+      .where('dateKey', '==', dateKey)
+      .get();
+    attendanceSnap.forEach(doc => {
+      const data = doc.data();
+      if (typeof data.employeeId === 'string') {
+        attendanceByEmployeeId.set(data.employeeId, data);
+      }
+    });
+  }
+
+  let activeEmployees = 0;
+  let checkedInCount = 0;
+  let presentCount = 0;
+  let lateCount = 0;
+  let checkedOutCount = 0;
+  const employees = [];
+  const logs = [];
+
+  employeesSnap.forEach(doc => {
+    const employeeData = doc.data();
+    const isActive = employeeData.isActive !== false;
+    const attendance = attendanceByEmployeeId.get(doc.id) || null;
+    if (isActive) activeEmployees++;
+    if (attendance) {
+      checkedInCount++;
+      if (attendance.status === 'present') presentCount++;
+      if (attendance.status === 'late') lateCount++;
+      if (attendance.checkOutAt) checkedOutCount++;
+    }
+
+    let todayAttendance = attendanceForDashboard(attendance);
+    if (!todayAttendance && holidayInfo.isHoliday && isActive) {
+      todayAttendance = {
+        status: holidayInfo.statusText,
+        checkInFormatted: '-',
+        checkOutFormatted: '-'
+      };
+    }
+
+    employees.push({
+      id: doc.id,
+      authEmail: employeeData.authEmail || employeeData.personalEmail || 'N/A',
+      employeeCode: employeeData.employeeCode || employeeData.employeeId || doc.id,
+      isActive,
+      hasFcmToken: Boolean(employeeData.fcmToken),
+      profile: employeeProfile(employeeData),
+      todayAttendance
+    });
+
+    const log = attendanceLog(doc.id, employeeData, dateKey, attendance, holidayInfo);
+    if (log) logs.push(log);
+  });
+
+  const absentCount = holidayInfo.isHoliday
+    ? 0
+    : Math.max(0, activeEmployees - checkedInCount);
+
+  return {
+    dateKey,
+    stats: {
+      totalEmployees: employeesSnap.size,
+      activeEmployees,
+      checkedInCount,
+      presentCount,
+      lateCount,
+      checkedOutCount,
+      absentCount,
+      isHoliday: holidayInfo.isHoliday,
+      holidayReason: holidayInfo.reason,
+      holidayStatusText: holidayInfo.statusText,
+      hasDateOverride: holidayInfo.hasOverride,
+      isOfficeOpen: holidayInfo.isOfficeOpen,
+      attendanceEnabled: holidayInfo.isOfficeOpen,
+      notice: holidayInfo.notice
+    },
+    officeSettings,
+    employees,
+    logs
+  };
+}
+
+// Initial dashboard payload: one employee read, one direct override read, one
+// policy read, and one date-scoped attendance query when the office is open.
+app.get('/api/dashboard', async (req, res) => {
+  try {
+    const dashboard = await loadDailyDashboard(req.query.date || getDhakaDateKey());
+    res.json({ success: true, ...dashboard });
+  } catch (error) {
+    console.error('Error fetching dashboard:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // API 1: Overview Statistics
 app.get('/api/stats', async (req, res) => {
   try {
-    const dateKey = req.query.date || getDhakaDateKey();
-    
-    // Fetch Employees
-    const employeesSnap = await db.collection('employees').get();
-    let totalEmployees = 0;
-    let activeEmployees = 0;
-    const employeeList = [];
-
-    employeesSnap.forEach(doc => {
-      const data = doc.data();
-      totalEmployees++;
-      if (data.isActive !== false) activeEmployees++;
-      employeeList.push({ id: doc.id, ...data });
-    });
-
-    // Fetch Attendance for target date for all active employees
-    let presentCount = 0;
-    let lateCount = 0;
-    let checkedOutCount = 0;
-    let checkedInCount = 0;
-
-    for (const emp of employeeList) {
-      const attSnap = await db
-        .collection('employees')
-        .doc(emp.id)
-        .collection('attendance_history')
-        .doc(dateKey)
-        .get();
-
-      if (attSnap.exists) {
-        const att = attSnap.data();
-        checkedInCount++;
-        if (att.status === 'present') presentCount++;
-        if (att.status === 'late') lateCount++;
-        if (att.checkOutAt) checkedOutCount++;
-      }
-    }
-
-    // Fetch Office Settings
-    const policySnap = await db.collection('settings').doc('office').get();
-    const officeSettings = policySnap.exists ? policySnap.data() : null;
-
-    const overridesSnap = await db.collection('settings').doc('office').collection('date_overrides').get();
-    const dateOverrides = [];
-    overridesSnap.forEach(doc => dateOverrides.push({ dateKey: doc.id, ...doc.data() }));
-
-    const holidayInfo = getHolidayStatus(dateKey, officeSettings, dateOverrides);
-    let absentCount = Math.max(0, activeEmployees - checkedInCount);
-    
-    if (holidayInfo.isHoliday) {
-      absentCount = 0;
-    }
-
+    const dashboard = await loadDailyDashboard(req.query.date || getDhakaDateKey());
     res.json({
       success: true,
-      dateKey,
-      stats: {
-        totalEmployees,
-        activeEmployees,
-        checkedInCount,
-        presentCount,
-        lateCount,
-        checkedOutCount,
-        absentCount,
-        isHoliday: holidayInfo.isHoliday,
-        holidayReason: holidayInfo.reason,
-        holidayStatusText: holidayInfo.statusText,
-        hasDateOverride: holidayInfo.hasOverride,
-        isOfficeOpen: holidayInfo.isOfficeOpen,
-        attendanceEnabled: !holidayInfo.isHoliday,
-        notice: holidayInfo.notice
-      },
-      officeSettings
+      dateKey: dashboard.dateKey,
+      stats: dashboard.stats,
+      officeSettings: dashboard.officeSettings
     });
   } catch (error) {
     console.error('Error fetching stats:', error);
@@ -256,63 +347,21 @@ app.get('/api/stats', async (req, res) => {
 app.get('/api/employees', async (req, res) => {
   try {
     const dateKey = req.query.date || getDhakaDateKey();
-    
-    const policySnap = await db.collection('settings').doc('office').get();
-    const officeSettings = policySnap.exists ? policySnap.data() : null;
-    const overridesSnap = await db.collection('settings').doc('office').collection('date_overrides').get();
-    const dateOverrides = [];
-    overridesSnap.forEach(doc => dateOverrides.push({ dateKey: doc.id, ...doc.data() }));
-    const holidayInfo = getHolidayStatus(dateKey, officeSettings, dateOverrides);
-
-    const employeesSnap = await db.collection('employees').get();
+    const employeesSnap = await db.collection(EMPLOYEES).get();
     const employees = [];
 
     for (const empDoc of employeesSnap.docs) {
       const empData = empDoc.data();
       const empId = empDoc.id;
 
-      const profileSnap = await db
-        .collection('employees')
-        .doc(empId)
-        .collection('profile')
-        .doc('details')
-        .get();
-
-      const profile = profileSnap.exists ? profileSnap.data() : {};
-      // Timestamps serialize as {_seconds,...}; the form needs a date input value.
-      profile.joiningDate = toDateInputValue(profile.joiningDate);
-
-      const attSnap = await db
-        .collection('employees')
-        .doc(empId)
-        .collection('attendance_history')
-        .doc(dateKey)
-        .get();
-
-      let attendance = null;
-      if (attSnap.exists) {
-        const aData = attSnap.data();
-        attendance = {
-          ...aData,
-          checkInFormatted: formatTimestamp(aData.checkInAt),
-          checkOutFormatted: formatTimestamp(aData.checkOutAt)
-        };
-      } else if (holidayInfo.isHoliday && empData.isActive !== false) {
-        attendance = {
-          status: holidayInfo.statusText,
-          checkInFormatted: '-',
-          checkOutFormatted: '-'
-        };
-      }
-
       employees.push({
         id: empId,
-        authEmail: empData.authEmail || profile.personalEmail || 'N/A',
-        employeeCode: empData.employeeCode || profile.employeeId || empId,
+        authEmail: empData.authEmail || empData.personalEmail || 'N/A',
+        employeeCode: empData.employeeCode || empData.employeeId || empId,
         isActive: empData.isActive !== false,
-        fcmToken: empData.fcmToken || null,
-        profile,
-        todayAttendance: attendance
+        hasFcmToken: Boolean(empData.fcmToken),
+        profile: employeeProfile(empData),
+        todayAttendance: null
       });
     }
 
@@ -384,20 +433,15 @@ app.post('/api/employees', async (req, res) => {
       profileData.profileImagePath = DEFAULT_PROFILE_IMAGE_PATH;
     }
 
-    // Create main employee doc. `isActive` is required by the app and by the
-    // markAttendance cloud function, so a new employee must start active.
-    const mainEmpData = {
+    // Profile and account metadata live in one canonical employee document.
+    const employeeData = {
+      ...profileData,
       isActive: true,
-      createdAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
       authEmail: emailToUse,
       employeeCode: toProfileString(employeeId)
     };
 
-    await db.collection('employees').doc(uid).set(mainEmpData);
-
-    // Create profile doc
-    await db.collection('employees').doc(uid).collection('profile').doc('details').set(profileData);
+    await db.collection(EMPLOYEES).doc(uid).set(employeeData);
 
     res.json({ success: true, id: uid });
   } catch (error) {
@@ -412,30 +456,27 @@ app.put('/api/employees/:id', async (req, res) => {
     const { id } = req.params;
     const { employeeId, joiningDate } = req.body;
 
-    const profileSnap = await db
-      .collection('employees')
-      .doc(id)
-      .collection('profile')
-      .doc('details')
-      .get();
-    const existingProfile = profileSnap.exists ? profileSnap.data() : {};
+    const employeeReference = db.collection(EMPLOYEES).doc(id);
+    const employeeSnap = await employeeReference.get();
+    if (!employeeSnap.exists) {
+      return res.status(404).json({ success: false, error: 'Employee not found.' });
+    }
+    const existingEmployee = employeeSnap.data();
 
     const profileData = {
       schemaVersion: 1,
       updatedAt: FieldValue.serverTimestamp()
     };
-    // Only send fields the client actually submitted; fall back to what is
-    // already stored so an incomplete form can never strip a required field.
     for (const field of PROFILE_STRING_FIELDS) {
       const submitted = req.body[field];
       profileData[field] = submitted === undefined
-        ? toProfileString(existingProfile[field])
+        ? toProfileString(existingEmployee[field])
         : toProfileString(submitted);
     }
     if (!profileData.profileImagePath) {
       profileData.profileImagePath = DEFAULT_PROFILE_IMAGE_PATH;
     }
-    if (joiningDate || existingProfile.joiningDate === undefined) {
+    if (joiningDate || existingEmployee.joiningDate === undefined) {
       profileData.joiningDate = toJoiningTimestamp(joiningDate);
     }
 
@@ -446,16 +487,11 @@ app.put('/api/employees/:id', async (req, res) => {
     };
     if (employeeId) mainEmpData.employeeCode = String(employeeId);
 
-    // Repair documents created before `isActive` was written.
-    const empSnap = await db.collection('employees').doc(id).get();
-    if (typeof empSnap.data()?.isActive !== 'boolean') {
+    if (typeof existingEmployee.isActive !== 'boolean') {
       mainEmpData.isActive = true;
     }
 
-    await db.collection('employees').doc(id).set(mainEmpData, { merge: true });
-
-    // Update profile doc
-    await db.collection('employees').doc(id).collection('profile').doc('details').set(profileData, { merge: true });
+    await employeeReference.set({ ...profileData, ...mainEmpData }, { merge: true });
 
     res.json({ success: true, id });
   } catch (error) {
@@ -469,8 +505,14 @@ app.delete('/api/employees/:id', async (req, res) => {
   try {
     const { id } = req.params;
     
-    // In a real production app, recursive delete is better handled by a Cloud Function or admin SDK's recursiveDelete
-    await db.recursiveDelete(db.collection('employees').doc(id));
+    const attendanceSnap = await db
+      .collection(ATTENDANCE)
+      .where('employeeId', '==', id)
+      .get();
+    const writer = db.bulkWriter();
+    attendanceSnap.docs.forEach(doc => writer.delete(doc.ref));
+    writer.delete(db.collection(EMPLOYEES).doc(id));
+    await writer.close();
     
     // Delete from Firebase Auth
     const { getAuth } = require('firebase-admin/auth');
@@ -501,16 +543,18 @@ app.get('/api/employees/:id/attendance', async (req, res) => {
     const startKey = `${month}-01`;
     const endKey = `${month}-31`;
 
-    const attendanceSnap = await db.collection('employees').doc(id).collection('attendance_history')
-      .where(require('firebase-admin/firestore').FieldPath.documentId(), '>=', startKey)
-      .where(require('firebase-admin/firestore').FieldPath.documentId(), '<=', endKey)
+    const attendanceSnap = await db.collection(ATTENDANCE)
+      .where('employeeId', '==', id)
+      .where('dateKey', '>=', startKey)
+      .where('dateKey', '<=', endKey)
+      .orderBy('dateKey', 'desc')
       .get();
 
     const records = [];
     attendanceSnap.forEach(doc => {
       const data = doc.data();
       records.push({
-        dateKey: doc.id,
+        dateKey: data.dateKey,
         checkInAt: data.checkInAt ? data.checkInAt.toDate().toISOString() : null,
         checkOutAt: data.checkOutAt ? data.checkOutAt.toDate().toISOString() : null,
         status: data.status,
@@ -530,74 +574,8 @@ app.get('/api/employees/:id/attendance', async (req, res) => {
 app.get('/api/attendance', async (req, res) => {
   try {
     const targetDate = req.query.date || getDhakaDateKey();
-    
-    const policySnap = await db.collection('settings').doc('office').get();
-    const officeSettings = policySnap.exists ? policySnap.data() : null;
-    const overridesSnap = await db.collection('settings').doc('office').collection('date_overrides').get();
-    const dateOverrides = [];
-    overridesSnap.forEach(doc => dateOverrides.push({ dateKey: doc.id, ...doc.data() }));
-    const holidayInfo = getHolidayStatus(targetDate, officeSettings, dateOverrides);
-
-    const employeesSnap = await db.collection('employees').get();
-    const attendanceLogs = [];
-
-    for (const empDoc of employeesSnap.docs) {
-      const empData = empDoc.data();
-      const empId = empDoc.id;
-
-      const profileSnap = await db
-        .collection('employees')
-        .doc(empId)
-        .collection('profile')
-        .doc('details')
-        .get();
-
-      const profile = profileSnap.exists ? profileSnap.data() : {};
-
-      const attSnap = await db
-        .collection('employees')
-        .doc(empId)
-        .collection('attendance_history')
-        .doc(targetDate)
-        .get();
-
-      if (attSnap.exists) {
-        const att = attSnap.data();
-        attendanceLogs.push({
-          id: empId,
-          employeeName: profile.employeeName || empData.authEmail || 'Unknown',
-          employeeCode: profile.employeeId || empData.employeeCode || empId,
-          designation: profile.designation || 'N/A',
-          department: profile.department || 'N/A',
-          dateKey: targetDate,
-          status: att.status || 'present',
-          lateByMinutes: att.lateByMinutes || 0,
-          checkInAt: att.checkInAt ? formatTimestamp(att.checkInAt) : 'N/A',
-          checkOutAt: att.checkOutAt ? formatTimestamp(att.checkOutAt) : 'Pending',
-          checkInLocation: att.checkInLocation || null,
-          checkOutLocation: att.checkOutLocation || null
-        });
-      } else {
-        if (empData.isActive !== false) {
-          attendanceLogs.push({
-            id: empId,
-            employeeName: profile.employeeName || empData.authEmail || 'Unknown',
-            employeeCode: profile.employeeId || empData.employeeCode || empId,
-            designation: profile.designation || 'N/A',
-            department: profile.department || 'N/A',
-            dateKey: targetDate,
-            status: holidayInfo.isHoliday ? holidayInfo.statusText : 'absent',
-            lateByMinutes: 0,
-            checkInAt: '-',
-            checkOutAt: '-',
-            checkInLocation: null,
-            checkOutLocation: null
-          });
-        }
-      }
-    }
-
-    res.json({ success: true, date: targetDate, logs: attendanceLogs });
+    const dashboard = await loadDailyDashboard(targetDate);
+    res.json({ success: true, date: targetDate, logs: dashboard.logs });
   } catch (error) {
     console.error('Error fetching attendance logs:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -654,10 +632,8 @@ app.put('/api/attendance/edit', async (req, res) => {
     }
 
     const attendanceRef = db
-      .collection('employees')
-      .doc(employeeId)
-      .collection('attendance_history')
-      .doc(dateKey);
+      .collection(ATTENDANCE)
+      .doc(`${dateKey}_${employeeId}`);
 
     const attendanceSnap = await attendanceRef.get();
     if (!attendanceSnap.exists) {
@@ -692,10 +668,8 @@ app.delete('/api/attendance/delete', async (req, res) => {
     }
 
     await db
-      .collection('employees')
-      .doc(employeeId)
-      .collection('attendance_history')
-      .doc(dateKey)
+      .collection(ATTENDANCE)
+      .doc(`${dateKey}_${employeeId}`)
       .delete();
 
     res.json({ success: true, employeeId, dateKey });
@@ -831,7 +805,8 @@ const NOTIFICATION_LOGS = 'notification_logs';
 const SCHEDULED_NOTIFICATIONS = 'scheduled_notifications';
 const MAX_SELECTED_RECIPIENTS = 500;
 const FCM_MULTICAST_CHUNK = 500;
-const SCHEDULER_TICK_MS = 60 * 1000;
+const SCHEDULER_TICK_MS = 5 * 60 * 1000;
+const SCHEDULER_BATCH_LIMIT = 100;
 
 function optionalString(value, maxLength) {
   if (typeof value !== 'string') return '';
@@ -901,12 +876,7 @@ async function resolveRecipients(target, recipientUids) {
     }
 
     const employeeDocs = await db.getAll(
-      ...recipientUids.map(uid => db.collection('employees').doc(uid))
-    );
-    const profileDocs = await db.getAll(
-      ...recipientUids.map(uid =>
-        db.collection('employees').doc(uid).collection('profile').doc('details')
-      )
+      ...recipientUids.map(uid => db.collection(EMPLOYEES).doc(uid))
     );
 
     const tokens = [];
@@ -916,7 +886,6 @@ async function resolveRecipients(target, recipientUids) {
     for (let index = 0; index < recipientUids.length; index++) {
       const uid = recipientUids[index];
       const employeeDoc = employeeDocs[index];
-      const profile = profileDocs[index].exists ? profileDocs[index].data() : {};
 
       if (!employeeDoc.exists) {
         recipientNames.push(uid);
@@ -925,7 +894,7 @@ async function resolveRecipients(target, recipientUids) {
       }
 
       const employee = employeeDoc.data() || {};
-      recipientNames.push(profile.employeeName || employee.authEmail || uid);
+      recipientNames.push(employee.employeeName || employee.authEmail || uid);
 
       if (!employee.fcmToken) {
         failureCount++;
@@ -938,7 +907,7 @@ async function resolveRecipients(target, recipientUids) {
   }
 
   // All employees — every active employee that has registered a device.
-  const employeesSnap = await db.collection('employees').get();
+  const employeesSnap = await db.collection(EMPLOYEES).get();
   const tokens = [];
   let failureCount = 0;
 
@@ -1199,12 +1168,10 @@ app.post('/api/notifications/schedule', async (req, res) => {
     // an employee is renamed or removed before it fires.
     const recipientNames = [];
     if (target === 'selected_users') {
-      const profileDocs = await db.getAll(
-        ...recipientUids.map(uid =>
-          db.collection('employees').doc(uid).collection('profile').doc('details')
-        )
+      const employeeDocs = await db.getAll(
+        ...recipientUids.map(uid => db.collection(EMPLOYEES).doc(uid))
       );
-      profileDocs.forEach((doc, index) => {
+      employeeDocs.forEach((doc, index) => {
         recipientNames.push((doc.exists && doc.data().employeeName) || recipientUids[index]);
       });
     }
@@ -1369,14 +1336,15 @@ function nextRecurringDate(current, recurringType) {
 // long-running Express process, so it runs on an in-process interval and is
 // also exposed as an endpoint for manual runs.
 async function processDueScheduledNotifications() {
-  // Only the range filter goes to Firestore; `status` is matched in memory so
-  // this project does not need a deployed composite index to run.
   const snapshot = await db
     .collection(SCHEDULED_NOTIFICATIONS)
+    .where('status', '==', 'pending')
     .where('scheduledAt', '<=', Timestamp.fromDate(new Date()))
+    .orderBy('scheduledAt', 'asc')
+    .limit(SCHEDULER_BATCH_LIMIT)
     .get();
 
-  const dueDocs = snapshot.docs.filter(doc => doc.data().status === 'pending');
+  const dueDocs = snapshot.docs;
   if (dueDocs.length === 0) return { processed: 0, sent: 0, failed: 0 };
 
   let sent = 0;

@@ -23,3 +23,6 @@ npm start
 The dashboard will be available at `http://localhost:3000`.
 
 > Run only one instance at a time. Each process starts its own scheduled-notification worker, so two instances can dispatch the same scheduled notification twice.
+
+## Deployment
+Pushing to the `deployment` branch deploys to <https://sarah-time-dashboard.royalcourtbd.com> automatically. See [DEPLOYMENT.md](DEPLOYMENT.md).
