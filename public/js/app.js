@@ -920,7 +920,7 @@ window.handleDeleteAttendance = async function() {
     return;
   }
 
-  const confirmed = confirm('এই অ্যাটেন্ডেন্স রেকর্ডটি ডিলিট করবেন? এই কাজটি পূর্বাবস্থায় ফেরানো যাবে না।');
+  const confirmed = confirm('Delete this attendance record? This can\'t be undone.');
   if (!confirmed) return;
 
   const btn = document.getElementById('btnDeleteAttendance');
@@ -1708,7 +1708,7 @@ function duplicateNotificationToSend() {
 
 async function deleteNotifications(ids, collection) {
   if (ids.length === 0) return;
-  if (!confirm(`${ids.length}টি নোটিফিকেশন স্থায়ীভাবে ডিলিট হবে। আপনি কি নিশ্চিত?`)) return;
+  if (!confirm(`${ids.length} notification(s) will be permanently deleted. Are you sure?`)) return;
 
   try {
     const res = await fetch('/api/notifications/delete', {
