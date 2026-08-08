@@ -2,7 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { initializeApp, cert } = require('firebase-admin/app');
-const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
+const { getMessaging } = require('firebase-admin/messaging');
 
 // Initialize Firebase Admin SDK using local service account
 const serviceAccount = require('./service-account.json');
@@ -811,6 +812,702 @@ app.delete('/api/settings/date-override/:dateKey', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+// PUSH NOTIFICATIONS
+//
+// Ported from the Text Bee dashboard (`server/src/send-notification.js` and
+// `functions/index.js` Module 7). Same Firestore collections
+// (`notification_logs`, `scheduled_notifications`), same document fields and
+// the same request/response contract.
+//
+// One deliberate deviation: Text Bee publishes to the `all_users` FCM topic,
+// but the Sarah Time app never subscribes to a topic — it writes its
+// registration token to `employees/{uid}.fcmToken`
+// (backend_as_a_service.dart). So "all employees" is a token multicast over
+// every active employee instead of a topic publish.
+// ═══════════════════════════════════════════════════════════════════════
+
+const NOTIFICATION_LOGS = 'notification_logs';
+const SCHEDULED_NOTIFICATIONS = 'scheduled_notifications';
+const MAX_SELECTED_RECIPIENTS = 500;
+const FCM_MULTICAST_CHUNK = 500;
+const SCHEDULER_TICK_MS = 60 * 1000;
+
+function optionalString(value, maxLength) {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, maxLength);
+}
+
+// Text Bee accepts three spellings of the single-recipient target; keep them
+// working so a payload copied from that dashboard still resolves correctly.
+function normalizeTarget(target) {
+  return ['selected_users', 'single_user', 'single'].includes(target)
+    ? 'selected_users'
+    : 'all_users';
+}
+
+function selectedEmployeeIds(source) {
+  const rawIds = Array.isArray(source.recipientUids)
+    ? source.recipientUids
+    : source.recipientUid
+      ? [source.recipientUid]
+      : [];
+
+  return [...new Set(rawIds)]
+    .filter(uid => typeof uid === 'string' && uid.trim().length > 0)
+    .map(uid => uid.trim())
+    .slice(0, MAX_SELECTED_RECIPIENTS);
+}
+
+function buildFcmPayload({ title, body, imageUrl, actionUrl }) {
+  const notification = { title, body };
+  if (imageUrl) notification.imageUrl = imageUrl;
+
+  const data = { type: 'push' };
+  if (imageUrl) data.imageUrl = imageUrl;
+  if (actionUrl) data.actionUrl = actionUrl;
+
+  return { notification, data };
+}
+
+// The dashboard treats a bare 'YYYY-MM-DDTHH:mm' as Dhaka wall-clock time, the
+// same reading `toJoiningTimestamp` and the attendance editor use.
+function toDhakaDate(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/.test(raw);
+  if (hasZone) {
+    const parsed = new Date(raw);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+  const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw) ? `${raw}:00` : raw;
+  const parsed = new Date(`${withSeconds}+06:00`);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+async function writeNotificationLog(data) {
+  await db.collection(NOTIFICATION_LOGS).add({
+    ...data,
+    timestamp: FieldValue.serverTimestamp()
+  });
+}
+
+// Resolves the device tokens for a send. `failureCount` counts employees that
+// cannot be reached at all — deleted, deactivated, or never registered a device.
+async function resolveRecipients(target, recipientUids) {
+  if (target === 'selected_users') {
+    if (recipientUids.length === 0) {
+      return { tokens: [], recipientNames: [], failureCount: 0 };
+    }
+
+    const employeeDocs = await db.getAll(
+      ...recipientUids.map(uid => db.collection('employees').doc(uid))
+    );
+    const profileDocs = await db.getAll(
+      ...recipientUids.map(uid =>
+        db.collection('employees').doc(uid).collection('profile').doc('details')
+      )
+    );
+
+    const tokens = [];
+    const recipientNames = [];
+    let failureCount = 0;
+
+    for (let index = 0; index < recipientUids.length; index++) {
+      const uid = recipientUids[index];
+      const employeeDoc = employeeDocs[index];
+      const profile = profileDocs[index].exists ? profileDocs[index].data() : {};
+
+      if (!employeeDoc.exists) {
+        recipientNames.push(uid);
+        failureCount++;
+        continue;
+      }
+
+      const employee = employeeDoc.data() || {};
+      recipientNames.push(profile.employeeName || employee.authEmail || uid);
+
+      if (!employee.fcmToken) {
+        failureCount++;
+        continue;
+      }
+      tokens.push(employee.fcmToken);
+    }
+
+    return { tokens: [...new Set(tokens)], recipientNames, failureCount };
+  }
+
+  // All employees — every active employee that has registered a device.
+  const employeesSnap = await db.collection('employees').get();
+  const tokens = [];
+  let failureCount = 0;
+
+  employeesSnap.forEach(doc => {
+    const employee = doc.data() || {};
+    if (employee.isActive === false) return;
+    if (!employee.fcmToken) {
+      failureCount++;
+      return;
+    }
+    tokens.push(employee.fcmToken);
+  });
+
+  return { tokens: [...new Set(tokens)], recipientNames: [], failureCount };
+}
+
+async function sendToTokens(tokens, notification, data) {
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (let index = 0; index < tokens.length; index += FCM_MULTICAST_CHUNK) {
+    const chunk = tokens.slice(index, index + FCM_MULTICAST_CHUNK);
+    const result = await getMessaging().sendEachForMulticast({
+      notification,
+      data,
+      tokens: chunk
+    });
+    successCount += result.successCount;
+    failureCount += result.failureCount;
+  }
+
+  return { successCount, failureCount };
+}
+
+// Shared by the immediate send endpoint and the scheduled-notification runner.
+// Throws with `code = 'no_recipients'` when nobody could be reached, matching
+// Text Bee's "No users could be reached" behaviour.
+async function deliverNotification({ target, title, body, imageUrl, actionUrl, recipientUids }) {
+  const { notification, data } = buildFcmPayload({ title, body, imageUrl, actionUrl });
+  const resolved = await resolveRecipients(target, recipientUids);
+
+  if (resolved.tokens.length === 0) {
+    const error = new Error('No employees could be reached');
+    error.code = 'no_recipients';
+    error.recipientNames = resolved.recipientNames;
+    error.failureCount = Math.max(resolved.failureCount, 1);
+    throw error;
+  }
+
+  const sendResult = await sendToTokens(resolved.tokens, notification, data);
+
+  return {
+    successCount: sendResult.successCount,
+    failureCount: resolved.failureCount + sendResult.failureCount,
+    recipientNames: resolved.recipientNames
+  };
+}
+
+// API 9: Send Notification (immediate)
+app.post('/api/notifications/send', async (req, res) => {
+  const payload = req.body || {};
+  const title = optionalString(payload.title, 200);
+  const body = optionalString(payload.body, 2000);
+  const imageUrl = optionalString(payload.imageUrl, 2048);
+  const actionUrl = optionalString(payload.actionUrl, 2048);
+
+  if (!title || !body) {
+    return res.status(400).json({ success: false, message: 'title and body are required' });
+  }
+
+  const target = normalizeTarget(payload.target);
+  const recipientUids = target === 'selected_users' ? selectedEmployeeIds(payload) : [];
+
+  if (target === 'selected_users' && recipientUids.length === 0) {
+    return res.status(400).json({ success: false, message: 'At least one employee must be selected' });
+  }
+
+  try {
+    const result = await deliverNotification({
+      target,
+      title,
+      body,
+      imageUrl,
+      actionUrl,
+      recipientUids
+    });
+
+    await writeNotificationLog({
+      target,
+      title,
+      body,
+      imageUrl: imageUrl || null,
+      actionUrl: actionUrl || null,
+      recipientUids: target === 'selected_users' ? recipientUids : null,
+      recipientNames: result.recipientNames.length > 0 ? result.recipientNames : null,
+      status: 'success',
+      successCount: result.successCount,
+      failureCount: result.failureCount,
+      source: 'dashboard'
+    });
+
+    const message = `Notification sent to ${result.successCount} employee(s)` +
+      (result.failureCount > 0 ? `, ${result.failureCount} could not be reached` : '');
+
+    res.json({ success: true, message, data: result });
+  } catch (error) {
+    console.error('Error sending notification:', error);
+
+    try {
+      await writeNotificationLog({
+        target,
+        title,
+        body,
+        imageUrl: imageUrl || null,
+        actionUrl: actionUrl || null,
+        recipientUids: target === 'selected_users' ? recipientUids : null,
+        recipientNames: error.recipientNames && error.recipientNames.length > 0 ? error.recipientNames : null,
+        status: 'failed',
+        error: error.message || 'Unknown error',
+        successCount: 0,
+        failureCount: error.failureCount || 1,
+        source: 'dashboard'
+      });
+    } catch (logError) {
+      console.error('Could not write notification failure log:', logError);
+    }
+
+    if (error.code === 'no_recipients') {
+      return res.status(400).json({
+        success: false,
+        message: target === 'selected_users'
+          ? 'No device token available for the selected employee(s)'
+          : 'No active employee has registered a device yet'
+      });
+    }
+
+    res.status(500).json({ success: false, message: error.message || 'Failed to send notification' });
+  }
+});
+
+// API 10: Notification History (paginated + filtered)
+app.get('/api/notifications/history', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const targetFilter = (req.query.target || '').trim();
+    const statusFilter = (req.query.status || '').trim();
+    const search = (req.query.search || '').trim().toLowerCase();
+    const dateFrom = (req.query.dateFrom || '').trim();
+    const dateTo = (req.query.dateTo || '').trim();
+
+    const snapshot = await db.collection(NOTIFICATION_LOGS).orderBy('timestamp', 'desc').get();
+
+    let logs = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        target: data.target || 'all_users',
+        title: data.title || '',
+        body: data.body || '',
+        imageUrl: data.imageUrl || null,
+        actionUrl: data.actionUrl || null,
+        recipientUids: data.recipientUids || null,
+        recipientNames: data.recipientNames || null,
+        status: data.status || 'unknown',
+        error: data.error || null,
+        successCount: data.successCount || 0,
+        failureCount: data.failureCount || 0,
+        scheduledNotificationId: data.scheduledNotificationId || null,
+        timestamp: data.timestamp?.toDate?.()?.toISOString() || null
+      };
+    });
+
+    if (targetFilter && ['all_users', 'selected_users', 'single_user'].includes(targetFilter)) {
+      const normalized = normalizeTarget(targetFilter);
+      logs = logs.filter(log => normalizeTarget(log.target) === normalized);
+    }
+    if (statusFilter && ['success', 'failed'].includes(statusFilter)) {
+      logs = logs.filter(log => log.status === statusFilter);
+    }
+    if (search) {
+      logs = logs.filter(log =>
+        log.title.toLowerCase().includes(search) ||
+        log.body.toLowerCase().includes(search) ||
+        (log.recipientNames || []).some(name => String(name).toLowerCase().includes(search))
+      );
+    }
+    // Both bounds are inclusive Dhaka calendar days, like every other date
+    // filter in this dashboard.
+    if (dateFrom) {
+      const from = toDhakaDate(`${dateFrom.slice(0, 10)}T00:00`);
+      if (from) logs = logs.filter(log => log.timestamp && new Date(log.timestamp) >= from);
+    }
+    if (dateTo) {
+      const to = toDhakaDate(`${dateTo.slice(0, 10)}T23:59:59`);
+      if (to) logs = logs.filter(log => log.timestamp && new Date(log.timestamp) <= to);
+    }
+
+    const totalCount = logs.length;
+    const startIndex = (page - 1) * limit;
+
+    res.json({
+      success: true,
+      data: {
+        logs: logs.slice(startIndex, startIndex + limit),
+        totalCount,
+        page,
+        limit,
+        hasMore: startIndex + limit < totalCount
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching notification history:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// API 11: Schedule a Notification
+app.post('/api/notifications/schedule', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const title = optionalString(payload.title, 200);
+    const body = optionalString(payload.body, 2000);
+    const imageUrl = optionalString(payload.imageUrl, 2048);
+    const actionUrl = optionalString(payload.actionUrl, 2048);
+    const isRecurring = Boolean(payload.isRecurring);
+    const recurringType = payload.recurringType;
+
+    if (!title || !body) {
+      return res.status(400).json({ success: false, message: 'title and body are required' });
+    }
+    if (!payload.scheduledAt) {
+      return res.status(400).json({ success: false, message: 'scheduledAt is required' });
+    }
+
+    const scheduledDate = toDhakaDate(payload.scheduledAt);
+    if (!scheduledDate) {
+      return res.status(400).json({ success: false, message: 'Invalid scheduledAt date format' });
+    }
+    if (scheduledDate <= new Date()) {
+      return res.status(400).json({ success: false, message: 'scheduledAt must be in the future' });
+    }
+    if (isRecurring && !['daily', 'weekly', 'monthly'].includes(recurringType)) {
+      return res.status(400).json({
+        success: false,
+        message: "recurringType must be 'daily', 'weekly', or 'monthly'"
+      });
+    }
+
+    const target = normalizeTarget(payload.target);
+    const recipientUids = target === 'selected_users' ? selectedEmployeeIds(payload) : [];
+
+    if (target === 'selected_users' && recipientUids.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one employee must be selected' });
+    }
+
+    // Resolve the display names now so the scheduled row stays readable even if
+    // an employee is renamed or removed before it fires.
+    const recipientNames = [];
+    if (target === 'selected_users') {
+      const profileDocs = await db.getAll(
+        ...recipientUids.map(uid =>
+          db.collection('employees').doc(uid).collection('profile').doc('details')
+        )
+      );
+      profileDocs.forEach((doc, index) => {
+        recipientNames.push((doc.exists && doc.data().employeeName) || recipientUids[index]);
+      });
+    }
+
+    const docRef = await db.collection(SCHEDULED_NOTIFICATIONS).add({
+      target,
+      title,
+      body,
+      imageUrl: imageUrl || null,
+      actionUrl: actionUrl || null,
+      recipientUids: target === 'selected_users' ? recipientUids : null,
+      recipientNames: recipientNames.length > 0 ? recipientNames : null,
+      scheduledAt: Timestamp.fromDate(scheduledDate),
+      status: 'pending',
+      isRecurring,
+      recurringType: isRecurring ? recurringType : null,
+      createdAt: FieldValue.serverTimestamp()
+    });
+
+    const audience = target === 'selected_users'
+      ? `${recipientUids.length} employee(s)`
+      : 'all employees';
+
+    res.json({
+      success: true,
+      message: `Notification for ${audience} scheduled at ${scheduledDate.toISOString()}`,
+      data: { id: docRef.id }
+    });
+  } catch (error) {
+    console.error('Error scheduling notification:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to schedule notification' });
+  }
+});
+
+// API 12: Scheduled Notifications List
+app.get('/api/notifications/scheduled', async (req, res) => {
+  try {
+    const snapshot = await db.collection(SCHEDULED_NOTIFICATIONS).orderBy('scheduledAt', 'asc').get();
+
+    const notifications = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        title: data.title || '',
+        body: data.body || '',
+        target: data.target || 'all_users',
+        imageUrl: data.imageUrl || null,
+        actionUrl: data.actionUrl || null,
+        recipientUids: data.recipientUids || null,
+        recipientNames: data.recipientNames || null,
+        scheduledAt: data.scheduledAt?.toDate?.()?.toISOString() || null,
+        status: data.status || 'pending',
+        isRecurring: data.isRecurring || false,
+        recurringType: data.recurringType || null,
+        createdAt: data.createdAt?.toDate?.()?.toISOString() || null
+      };
+    });
+
+    res.json({ success: true, data: notifications });
+  } catch (error) {
+    console.error('Error fetching scheduled notifications:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// API 13: Cancel a Scheduled Notification
+app.post('/api/notifications/cancel', async (req, res) => {
+  try {
+    const { notificationId } = req.body || {};
+    if (!notificationId) {
+      return res.status(400).json({ success: false, message: 'notificationId is required' });
+    }
+
+    const docRef = db.collection(SCHEDULED_NOTIFICATIONS).doc(notificationId);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ success: false, message: 'Scheduled notification not found' });
+    }
+
+    const status = doc.data().status;
+    if (status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel notification with status '${status}'`
+      });
+    }
+
+    await docRef.update({
+      status: 'cancelled',
+      cancelledAt: FieldValue.serverTimestamp()
+    });
+
+    res.json({ success: true, message: 'Scheduled notification cancelled successfully' });
+  } catch (error) {
+    console.error('Error cancelling scheduled notification:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to cancel notification' });
+  }
+});
+
+// API 14: Delete Notifications (history or scheduled)
+app.post('/api/notifications/delete', async (req, res) => {
+  try {
+    const { ids, collection } = req.body || {};
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'ids array is required' });
+    }
+
+    const allowed = [NOTIFICATION_LOGS, SCHEDULED_NOTIFICATIONS];
+    if (!collection || !allowed.includes(collection)) {
+      return res.status(400).json({
+        success: false,
+        message: "collection must be 'notification_logs' or 'scheduled_notifications'"
+      });
+    }
+
+    // Firestore caps a write batch at 500 operations.
+    const batches = [];
+    let batch = db.batch();
+    let count = 0;
+
+    for (const id of ids) {
+      batch.delete(db.collection(collection).doc(id));
+      count++;
+      if (count % 500 === 0) {
+        batches.push(batch);
+        batch = db.batch();
+      }
+    }
+    if (count % 500 !== 0) batches.push(batch);
+
+    await Promise.all(batches.map(b => b.commit()));
+
+    res.json({ success: true, message: `${ids.length} notification(s) deleted` });
+  } catch (error) {
+    console.error('Error deleting notifications:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to delete notifications' });
+  }
+});
+
+function nextRecurringDate(current, recurringType) {
+  const next = new Date(current);
+  switch (recurringType) {
+    case 'daily':
+      next.setDate(next.getDate() + 1);
+      return next;
+    case 'weekly':
+      next.setDate(next.getDate() + 7);
+      return next;
+    case 'monthly':
+      next.setMonth(next.getMonth() + 1);
+      return next;
+    default:
+      return null;
+  }
+}
+
+// Sends every pending scheduled notification whose time has come, logs the
+// outcome to `notification_logs`, and queues the next occurrence of a
+// recurring one. Text Bee runs this from Cloud Scheduler; this dashboard is a
+// long-running Express process, so it runs on an in-process interval and is
+// also exposed as an endpoint for manual runs.
+async function processDueScheduledNotifications() {
+  // Only the range filter goes to Firestore; `status` is matched in memory so
+  // this project does not need a deployed composite index to run.
+  const snapshot = await db
+    .collection(SCHEDULED_NOTIFICATIONS)
+    .where('scheduledAt', '<=', Timestamp.fromDate(new Date()))
+    .get();
+
+  const dueDocs = snapshot.docs.filter(doc => doc.data().status === 'pending');
+  if (dueDocs.length === 0) return { processed: 0, sent: 0, failed: 0 };
+
+  let sent = 0;
+  let failed = 0;
+
+  for (const doc of dueDocs) {
+    const data = doc.data();
+    const target = normalizeTarget(data.target);
+    const recipientUids = target === 'selected_users' ? selectedEmployeeIds(data) : [];
+
+    let status = 'success';
+    let sendError = null;
+    let successCount = 0;
+    let failureCount = 0;
+
+    try {
+      const result = await deliverNotification({
+        target,
+        title: data.title || '',
+        body: data.body || '',
+        imageUrl: data.imageUrl || '',
+        actionUrl: data.actionUrl || '',
+        recipientUids
+      });
+      successCount = result.successCount;
+      failureCount = result.failureCount;
+    } catch (error) {
+      console.error(`Failed to send scheduled notification ${doc.id}:`, error);
+      status = 'failed';
+      sendError = error.message || 'Unknown error';
+      failureCount = error.failureCount || 1;
+    }
+
+    try {
+      await writeNotificationLog({
+        target,
+        title: data.title || '',
+        body: data.body || '',
+        imageUrl: data.imageUrl || null,
+        actionUrl: data.actionUrl || null,
+        recipientUids: target === 'selected_users' ? recipientUids : null,
+        recipientNames: data.recipientNames || null,
+        status,
+        error: sendError,
+        successCount,
+        failureCount,
+        scheduledNotificationId: doc.id,
+        source: 'scheduler'
+      });
+    } catch (logError) {
+      console.error('Could not log scheduled notification:', logError);
+    }
+
+    try {
+      await doc.ref.update({
+        status: status === 'success' ? 'sent' : 'failed',
+        processedAt: FieldValue.serverTimestamp()
+      });
+    } catch (updateError) {
+      console.error('Could not update scheduled notification status:', updateError);
+    }
+
+    if (data.isRecurring && status === 'success') {
+      try {
+        const currentScheduled = data.scheduledAt.toDate();
+        const nextDate = nextRecurringDate(currentScheduled, data.recurringType);
+
+        if (nextDate) {
+          await db.collection(SCHEDULED_NOTIFICATIONS).add({
+            target,
+            title: data.title || '',
+            body: data.body || '',
+            imageUrl: data.imageUrl || null,
+            actionUrl: data.actionUrl || null,
+            recipientUids: target === 'selected_users' ? recipientUids : null,
+            recipientNames: data.recipientNames || null,
+            scheduledAt: Timestamp.fromDate(nextDate),
+            status: 'pending',
+            isRecurring: true,
+            recurringType: data.recurringType,
+            createdAt: FieldValue.serverTimestamp(),
+            parentNotificationId: doc.id
+          });
+          console.log(`Recurring notification ${doc.id}: next occurrence at ${nextDate.toISOString()}`);
+        }
+      } catch (recurringError) {
+        console.error('Could not queue next recurring notification:', recurringError);
+      }
+    }
+
+    if (status === 'success') sent++;
+    else failed++;
+  }
+
+  return { processed: sent + failed, sent, failed };
+}
+
+// API 15: Run Due Scheduled Notifications (manual trigger)
+app.post('/api/notifications/run-scheduled', async (req, res) => {
+  try {
+    const result = await processDueScheduledNotifications();
+    const message = result.processed === 0
+      ? 'No due notifications'
+      : `Processed ${result.processed} notification(s): ${result.sent} sent, ${result.failed} failed`;
+    res.json({ success: true, message, data: result });
+  } catch (error) {
+    console.error('Error running scheduled notifications:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// One run at a time — a slow FCM batch must not overlap with the next tick and
+// send the same notification twice.
+let isProcessingScheduled = false;
+async function scheduledNotificationTick() {
+  if (isProcessingScheduled) return;
+  isProcessingScheduled = true;
+  try {
+    const result = await processDueScheduledNotifications();
+    if (result.processed > 0) {
+      console.log(`Scheduled notifications: ${result.sent} sent, ${result.failed} failed`);
+    }
+  } catch (error) {
+    console.error('Scheduled notification tick failed:', error);
+  } finally {
+    isProcessingScheduled = false;
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Sarah Time Admin Dashboard running on http://localhost:${PORT}`);
+  scheduledNotificationTick();
+  setInterval(scheduledNotificationTick, SCHEDULER_TICK_MS);
 });

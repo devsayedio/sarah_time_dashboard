@@ -54,6 +54,7 @@ function initUI() {
 
   document.getElementById('refreshBtn').addEventListener('click', () => {
     loadAllData();
+    if (state.currentTab === 'notifications') loadNotificationsData();
   });
 
   // Tab Navigation Setup
@@ -86,7 +87,9 @@ function initUI() {
     const empId = document.getElementById('editEmpUid').value;
     if (empId) loadEmployeeAttendance(empId, e.target.value);
   });
-  
+
+  initNotifications();
+
   // Theme Toggle
   const themeBtn = document.getElementById('themeToggleBtn');
   if (themeBtn) {
@@ -116,6 +119,7 @@ function switchTab(tabName) {
     dashboard: { title: 'Dashboard Overview', sub: "Today's live attendance statistics" },
     attendance: { title: 'Attendance Logs', sub: 'Comprehensive record of employee check-ins' },
     employees: { title: 'Employee Directory', sub: 'Manage registered employees and profiles' },
+    notifications: { title: 'Push Notifications', sub: 'Send, schedule and review employee notifications' },
     settings: { title: 'Office & Policy Settings', sub: 'Configure geofencing and working hours' }
   };
 
@@ -126,6 +130,11 @@ function switchTab(tabName) {
 
   if (tabName === 'settings') {
     setTimeout(initOrUpdateMap, 200);
+  }
+
+  if (tabName === 'notifications') {
+    renderNotifRecipientSummary();
+    loadNotificationsData();
   }
 }
 
@@ -236,6 +245,7 @@ async function fetchEmployees() {
       state.employees = data.employees;
       renderDashSummary();
       renderEmployeeDirectory();
+      renderNotifRecipientSummary();
     }
   } catch (err) {
     console.error('Error fetching employees:', err);
@@ -1058,4 +1068,876 @@ async function loadEmployeeAttendance(empId, month) {
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--danger);">Failed to load data.</td></tr>`;
   }
 }
-;
+
+// ═══════════════════════════════════════════════════════════════════════
+// PUSH NOTIFICATIONS
+//
+// Ported from the Text Bee dashboard's notification module
+// (lib/presentation/pages/notification_management_page.dart +
+// lib/data/services/notification_service.dart). Same three tabs, the same
+// target / status / recurring vocabulary and the same API contract.
+//
+// Recipient search runs against `state.employees`, which the dashboard has
+// already loaded, instead of Text Bee's server-side user search endpoint —
+// this project has one employee directory in memory, so a second endpoint
+// would only duplicate it.
+// ═══════════════════════════════════════════════════════════════════════
+
+const NOTIF_HISTORY_PAGE_SIZE = 20;
+
+const notifState = {
+  historyLogs: [],
+  historyPage: 1,
+  historyTotalCount: 0,
+  historyHasMore: false,
+  historySelection: new Set(),
+  scheduled: [],
+  scheduledSelection: new Set(),
+  detailLogId: null,
+  searchDebounce: null
+};
+
+// ─── Formatting helpers (mirror NotificationLogModel getters) ─────────
+
+function notifTargetLabel(target) {
+  return target === 'all_users' ? 'All Employees' : 'Selected Employees';
+}
+
+function notifStatusLabel(status) {
+  const labels = { success: 'Sent', failed: 'Failed', pending: 'Scheduled', sent: 'Sent', cancelled: 'Cancelled' };
+  return labels[status] || status;
+}
+
+function notifRecurringLabel(item) {
+  if (!item.isRecurring) return 'One-time';
+  const labels = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly' };
+  return labels[item.recurringType] || 'Recurring';
+}
+
+function notifDeliverySummary(log) {
+  const total = (log.successCount || 0) + (log.failureCount || 0);
+  if (total === 0) return '-';
+  if (!log.failureCount) return `${log.successCount} sent`;
+  return `${log.successCount}/${total} delivered`;
+}
+
+function formatNotifTimestamp(iso) {
+  if (!iso) return 'N/A';
+  const date = new Date(iso);
+  if (isNaN(date.getTime())) return 'N/A';
+  return date.toLocaleString('en-US', {
+    timeZone: 'Asia/Dhaka',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+}
+
+function formatNotifTimeAgo(iso) {
+  if (!iso) return 'N/A';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days} days ago`;
+  return formatNotifTimestamp(iso);
+}
+
+function notifBodyPreview(body) {
+  const text = String(body || '');
+  return text.length <= 60 ? text : `${text.slice(0, 60)}...`;
+}
+
+// `datetime-local` value for Dhaka wall-clock time, `minutesAhead` from now.
+function getDhakaDateTimeLocal(minutesAhead = 0) {
+  const target = new Date(Date.now() + minutesAhead * 60000);
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dhaka',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(target);
+  const part = type => parts.find(p => p.type === type).value;
+  return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}`;
+}
+
+function employeeDisplayName(emp) {
+  return (emp.profile && emp.profile.employeeName) || emp.authEmail || emp.id;
+}
+
+function employeeDisplayCode(emp) {
+  return (emp.profile && emp.profile.employeeId) || emp.employeeCode || emp.id;
+}
+
+// ─── Recipient picker ─────────────────────────────────────────────────
+
+// One picker instance per form (send tab + schedule modal). Both search the
+// already-loaded employee directory and hold their own selection.
+function createRecipientPicker(ids, onChange) {
+  const picker = {
+    selected: [],
+    container: document.getElementById(ids.container),
+    chipList: document.getElementById(ids.chipList),
+    searchInput: document.getElementById(ids.search),
+    results: document.getElementById(ids.results),
+    clearBtn: document.getElementById(ids.clear),
+    onChange: onChange || (() => {})
+  };
+
+  picker.uids = () => picker.selected.map(emp => emp.id);
+
+  picker.renderChips = () => {
+    picker.chipList.innerHTML = picker.selected.map(emp => {
+      const name = employeeDisplayName(emp);
+      return `
+        <span class="chip">
+          <span class="chip-avatar">${escapeHtml(name.charAt(0).toUpperCase())}</span>
+          ${escapeHtml(name)}
+          <button type="button" class="chip-remove" data-remove="${escapeHtml(emp.id)}" title="Remove">&times;</button>
+        </span>
+      `;
+    }).join('');
+    picker.onChange();
+  };
+
+  picker.renderResults = () => {
+    const query = picker.searchInput.value.trim().toLowerCase();
+    if (!query) {
+      picker.results.innerHTML = '';
+      return;
+    }
+
+    const selectedIds = new Set(picker.uids());
+    const matches = state.employees
+      .filter(emp => !selectedIds.has(emp.id))
+      .filter(emp => {
+        const haystack = [
+          employeeDisplayName(emp),
+          employeeDisplayCode(emp),
+          emp.authEmail || '',
+          emp.profile?.officialEmail || ''
+        ].join(' ').toLowerCase();
+        return haystack.includes(query);
+      })
+      .slice(0, 8);
+
+    if (matches.length === 0) {
+      picker.results.innerHTML = `<div class="picker-empty">No employees found</div>`;
+      return;
+    }
+
+    picker.results.innerHTML = matches.map(emp => {
+      const name = employeeDisplayName(emp);
+      const noDevice = !emp.fcmToken
+        ? `<span class="badge failed" style="font-size:10px; padding:2px 8px;">No device</span>`
+        : '';
+      const inactive = !emp.isActive
+        ? `<span class="badge inactive" style="font-size:10px; padding:2px 8px;">Inactive</span>`
+        : '';
+      return `
+        <div class="picker-item" data-add="${escapeHtml(emp.id)}">
+          <div class="user-avatar" style="width:28px; height:28px; font-size:12px;">${escapeHtml(name.charAt(0).toUpperCase())}</div>
+          <div style="flex:1;">
+            <div class="user-name" style="font-size:13px;">${escapeHtml(name)}</div>
+            <div class="user-sub">${escapeHtml(employeeDisplayCode(emp))} &bull; ${escapeHtml(emp.authEmail || '')}</div>
+          </div>
+          ${inactive}
+          ${noDevice}
+        </div>
+      `;
+    }).join('');
+  };
+
+  picker.add = empId => {
+    if (picker.selected.some(emp => emp.id === empId)) return;
+    const employee = state.employees.find(emp => emp.id === empId);
+    if (!employee) return;
+    picker.selected.push(employee);
+    picker.searchInput.value = '';
+    picker.results.innerHTML = '';
+    picker.renderChips();
+  };
+
+  picker.remove = empId => {
+    picker.selected = picker.selected.filter(emp => emp.id !== empId);
+    picker.renderChips();
+    picker.renderResults();
+  };
+
+  picker.clear = () => {
+    picker.selected = [];
+    picker.searchInput.value = '';
+    picker.results.innerHTML = '';
+    picker.renderChips();
+  };
+
+  picker.setVisible = visible => {
+    picker.container.style.display = visible ? 'block' : 'none';
+    if (!visible) picker.clear();
+  };
+
+  picker.searchInput.addEventListener('input', picker.renderResults);
+  picker.results.addEventListener('click', event => {
+    const item = event.target.closest('[data-add]');
+    if (item) picker.add(item.getAttribute('data-add'));
+  });
+  picker.chipList.addEventListener('click', event => {
+    const button = event.target.closest('[data-remove]');
+    if (button) picker.remove(button.getAttribute('data-remove'));
+  });
+  picker.clearBtn.addEventListener('click', picker.clear);
+
+  return picker;
+}
+
+let sendPicker = null;
+let schedulePicker = null;
+
+// ─── Init ─────────────────────────────────────────────────────────────
+
+function initNotifications() {
+  // Sub-tab switching
+  document.querySelectorAll('.sub-tab').forEach(button => {
+    button.addEventListener('click', () => switchNotifSubTab(button.getAttribute('data-subtab')));
+  });
+
+  sendPicker = createRecipientPicker({
+    container: 'notifRecipientPicker',
+    chipList: 'notifChipList',
+    search: 'notifRecipientSearch',
+    results: 'notifRecipientResults',
+    clear: 'notifClearRecipients'
+  }, renderNotifJsonPreview);
+
+  schedulePicker = createRecipientPicker({
+    container: 'scheduleRecipientPicker',
+    chipList: 'scheduleChipList',
+    search: 'scheduleRecipientSearch',
+    results: 'scheduleRecipientResults',
+    clear: 'scheduleClearRecipients'
+  });
+
+  // Target segments
+  bindSegmentGroup('notifTargetGroup', 'target', value => {
+    sendPicker.setVisible(value === 'selected_users');
+    renderNotifJsonPreview();
+  });
+  bindSegmentGroup('scheduleTargetGroup', 'target', value => {
+    schedulePicker.setVisible(value === 'selected_users');
+  });
+  bindSegmentGroup('scheduleRecurringType', 'recurring');
+
+  // Send form
+  ['notifTitle', 'notifBody', 'notifImageUrl', 'notifActionUrl'].forEach(id => {
+    document.getElementById(id).addEventListener('input', renderNotifJsonPreview);
+  });
+  document.getElementById('notifSendForm').addEventListener('submit', handleSendNotification);
+
+  // History filters
+  document.getElementById('notifHistorySearch').addEventListener('input', () => {
+    clearTimeout(notifState.searchDebounce);
+    notifState.searchDebounce = setTimeout(() => {
+      notifState.historyPage = 1;
+      fetchNotificationHistory();
+    }, 400);
+  });
+  ['notifHistoryTarget', 'notifHistoryStatus', 'notifHistoryFrom', 'notifHistoryTo'].forEach(id => {
+    document.getElementById(id).addEventListener('change', () => {
+      notifState.historyPage = 1;
+      fetchNotificationHistory();
+    });
+  });
+  document.getElementById('notifHistoryReset').addEventListener('click', () => {
+    document.getElementById('notifHistorySearch').value = '';
+    document.getElementById('notifHistoryTarget').value = '';
+    document.getElementById('notifHistoryStatus').value = '';
+    document.getElementById('notifHistoryFrom').value = '';
+    document.getElementById('notifHistoryTo').value = '';
+    notifState.historyPage = 1;
+    fetchNotificationHistory();
+  });
+  document.getElementById('notifHistoryPrev').addEventListener('click', () => {
+    if (notifState.historyPage > 1) {
+      notifState.historyPage--;
+      fetchNotificationHistory();
+    }
+  });
+  document.getElementById('notifHistoryNext').addEventListener('click', () => {
+    if (notifState.historyHasMore) {
+      notifState.historyPage++;
+      fetchNotificationHistory();
+    }
+  });
+
+  // History selection + delete
+  document.getElementById('notifHistorySelectAll').addEventListener('change', event => {
+    notifState.historySelection = event.target.checked
+      ? new Set(notifState.historyLogs.map(log => log.id))
+      : new Set();
+    renderNotificationHistory();
+  });
+  document.getElementById('notifHistoryClearSelection').addEventListener('click', () => {
+    notifState.historySelection = new Set();
+    renderNotificationHistory();
+  });
+  document.getElementById('notifHistoryDelete').addEventListener('click', () => {
+    deleteNotifications([...notifState.historySelection], 'notification_logs');
+  });
+
+  // Scheduled selection + delete
+  document.getElementById('notifScheduledSelectAll').addEventListener('change', event => {
+    notifState.scheduledSelection = event.target.checked
+      ? new Set(notifState.scheduled.map(item => item.id))
+      : new Set();
+    renderScheduledNotifications();
+  });
+  document.getElementById('notifScheduledClearSelection').addEventListener('click', () => {
+    notifState.scheduledSelection = new Set();
+    renderScheduledNotifications();
+  });
+  document.getElementById('notifScheduledDelete').addEventListener('click', () => {
+    deleteNotifications([...notifState.scheduledSelection], 'scheduled_notifications');
+  });
+
+  // Scheduling
+  document.getElementById('btnOpenScheduleModal').addEventListener('click', openScheduleNotifModal);
+  document.getElementById('scheduleNotifForm').addEventListener('submit', handleScheduleNotification);
+  document.getElementById('scheduleRecurring').addEventListener('change', event => {
+    document.getElementById('scheduleRecurringTypeGroup').style.display = event.target.checked ? 'flex' : 'none';
+  });
+  document.getElementById('btnRunScheduled').addEventListener('click', runDueScheduledNotifications);
+  document.getElementById('btnDuplicateNotif').addEventListener('click', duplicateNotificationToSend);
+
+  renderNotifJsonPreview();
+}
+
+function bindSegmentGroup(groupId, dataKey, onChange) {
+  const group = document.getElementById(groupId);
+  if (!group) return;
+  group.addEventListener('click', event => {
+    const segment = event.target.closest('.segment');
+    if (!segment) return;
+    group.querySelectorAll('.segment').forEach(el => el.classList.remove('active'));
+    segment.classList.add('active');
+    if (onChange) onChange(segment.getAttribute(`data-${dataKey}`));
+  });
+}
+
+function getSegmentValue(groupId, dataKey) {
+  const active = document.querySelector(`#${groupId} .segment.active`);
+  return active ? active.getAttribute(`data-${dataKey}`) : null;
+}
+
+function switchNotifSubTab(subTabName) {
+  document.querySelectorAll('.sub-tab').forEach(el => el.classList.remove('active'));
+  document.querySelector(`.sub-tab[data-subtab="${subTabName}"]`)?.classList.add('active');
+  document.querySelectorAll('.sub-tab-page').forEach(el => el.classList.remove('active'));
+  document.getElementById(`subtab-${subTabName}`)?.classList.add('active');
+}
+
+function loadNotificationsData() {
+  fetchNotificationHistory();
+  fetchScheduledNotifications();
+}
+
+// Shows how many employees a broadcast can actually reach.
+function renderNotifRecipientSummary() {
+  const summary = document.getElementById('notifReachSummary');
+  if (!summary) return;
+  const active = state.employees.filter(emp => emp.isActive);
+  const reachable = active.filter(emp => emp.fcmToken);
+  summary.textContent = `${reachable.length} of ${active.length} active employees have a registered device`;
+}
+
+// ─── Send tab ─────────────────────────────────────────────────────────
+
+function collectSendPayload() {
+  const target = getSegmentValue('notifTargetGroup', 'target') || 'all_users';
+  const payload = {
+    target,
+    title: document.getElementById('notifTitle').value.trim(),
+    body: document.getElementById('notifBody').value.trim(),
+    imageUrl: document.getElementById('notifImageUrl').value.trim(),
+    actionUrl: document.getElementById('notifActionUrl').value.trim()
+  };
+  if (target === 'selected_users') payload.recipientUids = sendPicker.uids();
+  return payload;
+}
+
+function renderNotifJsonPreview() {
+  const preview = document.getElementById('notifJsonPreview');
+  if (!preview) return;
+  preview.textContent = JSON.stringify(collectSendPayload(), null, 2);
+  renderNotifRecipientSummary();
+}
+
+async function handleSendNotification(event) {
+  event.preventDefault();
+  const payload = collectSendPayload();
+
+  if (payload.target === 'selected_users' && payload.recipientUids.length === 0) {
+    alert('Please search and select at least one employee.');
+    return;
+  }
+
+  const audience = payload.target === 'all_users'
+    ? 'all active employees'
+    : `${payload.recipientUids.length} selected employee(s)`;
+  if (!confirm(`Send this notification to ${audience}?`)) return;
+
+  setBtnLoading('btnSendNotification', true);
+
+  try {
+    const res = await fetch('/api/notifications/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    alert(data.message || (data.success ? 'Notification sent.' : 'Failed to send notification.'));
+
+    if (data.success) {
+      document.getElementById('notifSendForm').reset();
+      sendPicker.clear();
+      renderNotifJsonPreview();
+      fetchNotificationHistory();
+    }
+  } catch (err) {
+    console.error('Error sending notification:', err);
+    alert('Could not connect to server.');
+  } finally {
+    setBtnLoading('btnSendNotification', false);
+  }
+}
+
+// ─── History tab ──────────────────────────────────────────────────────
+
+async function fetchNotificationHistory() {
+  const tbody = document.getElementById('notifHistoryTable');
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;">Loading...</td></tr>`;
+
+  const params = new URLSearchParams({
+    page: String(notifState.historyPage),
+    limit: String(NOTIF_HISTORY_PAGE_SIZE)
+  });
+  const search = document.getElementById('notifHistorySearch').value.trim();
+  const target = document.getElementById('notifHistoryTarget').value;
+  const status = document.getElementById('notifHistoryStatus').value;
+  const dateFrom = document.getElementById('notifHistoryFrom').value;
+  const dateTo = document.getElementById('notifHistoryTo').value;
+
+  if (search) params.set('search', search);
+  if (target) params.set('target', target);
+  if (status) params.set('status', status);
+  if (dateFrom) params.set('dateFrom', dateFrom);
+  if (dateTo) params.set('dateTo', dateTo);
+
+  try {
+    const res = await fetch(`/api/notifications/history?${params.toString()}`);
+    const data = await res.json();
+
+    if (!data.success) {
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:var(--danger);">${escapeHtml(data.message || 'Failed to load history.')}</td></tr>`;
+      return;
+    }
+
+    notifState.historyLogs = data.data.logs;
+    notifState.historyTotalCount = data.data.totalCount;
+    notifState.historyHasMore = data.data.hasMore;
+    // Drop selections that are no longer on screen.
+    notifState.historySelection = new Set(
+      [...notifState.historySelection].filter(id => notifState.historyLogs.some(log => log.id === id))
+    );
+    renderNotificationHistory();
+  } catch (err) {
+    console.error('Error fetching notification history:', err);
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:var(--danger);">Could not connect to server.</td></tr>`;
+  }
+}
+
+function renderNotificationHistory() {
+  const tbody = document.getElementById('notifHistoryTable');
+  const logs = notifState.historyLogs;
+
+  if (logs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; color:var(--text-muted);">No notifications found.</td></tr>`;
+  } else {
+    tbody.innerHTML = logs.map(log => {
+      const checked = notifState.historySelection.has(log.id) ? 'checked' : '';
+      const statusClass = log.status === 'success' ? 'success' : 'failed';
+      const failureNote = log.error
+        ? `<div class="user-sub" style="color:var(--danger);">${escapeHtml(log.error)}</div>`
+        : '';
+      return `
+        <tr>
+          <td><input type="checkbox" data-history-select="${escapeHtml(log.id)}" ${checked}></td>
+          <td>
+            <div>${escapeHtml(formatNotifTimestamp(log.timestamp))}</div>
+            <div class="user-sub">${escapeHtml(formatNotifTimeAgo(log.timestamp))}</div>
+          </td>
+          <td><span class="badge target">${escapeHtml(notifTargetLabel(log.target))}</span></td>
+          <td><div class="user-name">${escapeHtml(log.title)}</div></td>
+          <td style="max-width:260px; font-size:13px; color:var(--text-muted);">${escapeHtml(notifBodyPreview(log.body))}</td>
+          <td>${escapeHtml(notifDeliverySummary(log))}</td>
+          <td>
+            <span class="badge ${statusClass}">${escapeHtml(notifStatusLabel(log.status))}</span>
+            ${failureNote}
+          </td>
+          <td>
+            <button class="btn-secondary" style="padding:4px 12px; font-size:12px;" onclick="openNotifDetail('${escapeHtml(log.id)}')">View</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('[data-history-select]').forEach(checkbox => {
+      checkbox.addEventListener('change', event => {
+        const id = event.target.getAttribute('data-history-select');
+        if (event.target.checked) notifState.historySelection.add(id);
+        else notifState.historySelection.delete(id);
+        renderNotifHistorySelectionBar();
+      });
+    });
+  }
+
+  renderNotifHistorySelectionBar();
+  renderNotifHistoryPagination();
+}
+
+function renderNotifHistorySelectionBar() {
+  const count = notifState.historySelection.size;
+  document.getElementById('notifHistorySelectionBar').style.display = count > 0 ? 'flex' : 'none';
+  document.getElementById('notifHistorySelectedCount').textContent = `${count} selected`;
+  const selectAll = document.getElementById('notifHistorySelectAll');
+  selectAll.checked = count > 0 && count === notifState.historyLogs.length;
+}
+
+function renderNotifHistoryPagination() {
+  const bar = document.getElementById('notifHistoryPagination');
+  const total = notifState.historyTotalCount;
+
+  if (total === 0) {
+    bar.style.display = 'none';
+    return;
+  }
+
+  const start = (notifState.historyPage - 1) * NOTIF_HISTORY_PAGE_SIZE + 1;
+  const end = Math.min(start + notifState.historyLogs.length - 1, total);
+  bar.style.display = 'flex';
+  document.getElementById('notifHistoryRange').textContent = `Showing ${start}-${end} of ${total}`;
+  document.getElementById('notifHistoryPrev').disabled = notifState.historyPage <= 1;
+  document.getElementById('notifHistoryNext').disabled = !notifState.historyHasMore;
+}
+
+window.openNotifDetail = function(logId) {
+  const log = notifState.historyLogs.find(item => item.id === logId);
+  if (!log) return;
+
+  notifState.detailLogId = logId;
+
+  const row = (label, value) => `
+    <div class="detail-item" style="margin-bottom:14px;">
+      <span>${escapeHtml(label)}</span>
+      <p style="white-space:pre-wrap;">${escapeHtml(value)}</p>
+    </div>
+  `;
+
+  const recipients = Array.isArray(log.recipientNames) && log.recipientNames.length > 0
+    ? log.recipientNames.join(', ')
+    : notifTargetLabel(log.target);
+
+  let html = '';
+  html += row('Sent At', `${formatNotifTimestamp(log.timestamp)} (${formatNotifTimeAgo(log.timestamp)})`);
+  html += row('Target', notifTargetLabel(log.target));
+  html += row('Recipients', recipients);
+  html += row('Title', log.title);
+  html += row('Body', log.body);
+  html += row('Delivery', `${notifDeliverySummary(log)} — ${notifStatusLabel(log.status)}`);
+  if (log.imageUrl) html += row('Image URL', log.imageUrl);
+  if (log.actionUrl) html += row('Action URL', log.actionUrl);
+  if (log.scheduledNotificationId) html += row('Source', 'Scheduled notification');
+  if (log.error) html += row('Error', log.error);
+
+  document.getElementById('notifDetailBody').innerHTML = html;
+
+  const modal = document.getElementById('notifDetailModal');
+  modal.style.display = 'flex';
+  modal.classList.add('active');
+};
+
+window.closeNotifDetailModal = function() {
+  const modal = document.getElementById('notifDetailModal');
+  modal.classList.remove('active');
+  modal.style.display = 'none';
+};
+
+// Pre-fills the send form from a past notification, like Text Bee's
+// "Duplicate" action. Recipients are not restored — an old UID may no longer
+// belong to an active employee, so they must be picked again.
+function duplicateNotificationToSend() {
+  const log = notifState.historyLogs.find(item => item.id === notifState.detailLogId);
+  if (!log) return;
+
+  document.getElementById('notifTitle').value = log.title || '';
+  document.getElementById('notifBody').value = log.body || '';
+  document.getElementById('notifImageUrl').value = log.imageUrl || '';
+  document.getElementById('notifActionUrl').value = log.actionUrl || '';
+
+  const target = log.target === 'all_users' ? 'all_users' : 'selected_users';
+  const group = document.getElementById('notifTargetGroup');
+  group.querySelectorAll('.segment').forEach(segment => {
+    segment.classList.toggle('active', segment.getAttribute('data-target') === target);
+  });
+  sendPicker.clear();
+  sendPicker.setVisible(target === 'selected_users');
+
+  closeNotifDetailModal();
+  switchNotifSubTab('send');
+  renderNotifJsonPreview();
+}
+
+async function deleteNotifications(ids, collection) {
+  if (ids.length === 0) return;
+  if (!confirm(`${ids.length}টি নোটিফিকেশন স্থায়ীভাবে ডিলিট হবে। আপনি কি নিশ্চিত?`)) return;
+
+  try {
+    const res = await fetch('/api/notifications/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, collection })
+    });
+    const data = await res.json();
+
+    if (!data.success) {
+      alert(data.message || 'Failed to delete notifications.');
+      return;
+    }
+
+    if (collection === 'notification_logs') {
+      notifState.historySelection = new Set();
+      fetchNotificationHistory();
+    } else {
+      notifState.scheduledSelection = new Set();
+      fetchScheduledNotifications();
+    }
+  } catch (err) {
+    console.error('Error deleting notifications:', err);
+    alert('Could not connect to server.');
+  }
+}
+
+// ─── Scheduled tab ────────────────────────────────────────────────────
+
+async function fetchScheduledNotifications() {
+  const tbody = document.getElementById('notifScheduledTable');
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading...</td></tr>`;
+
+  try {
+    const res = await fetch('/api/notifications/scheduled');
+    const data = await res.json();
+
+    if (!data.success) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--danger);">${escapeHtml(data.message || 'Failed to load scheduled notifications.')}</td></tr>`;
+      return;
+    }
+
+    notifState.scheduled = data.data;
+    notifState.scheduledSelection = new Set(
+      [...notifState.scheduledSelection].filter(id => notifState.scheduled.some(item => item.id === id))
+    );
+    renderScheduledNotifications();
+  } catch (err) {
+    console.error('Error fetching scheduled notifications:', err);
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--danger);">Could not connect to server.</td></tr>`;
+  }
+}
+
+function renderScheduledNotifications() {
+  const tbody = document.getElementById('notifScheduledTable');
+  const items = notifState.scheduled;
+
+  if (items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No scheduled notifications yet.</td></tr>`;
+  } else {
+    tbody.innerHTML = items.map(item => {
+      const checked = notifState.scheduledSelection.has(item.id) ? 'checked' : '';
+      const recipients = Array.isArray(item.recipientNames) && item.recipientNames.length > 0
+        ? item.recipientNames.join(', ')
+        : '';
+      const cancelBtn = item.status === 'pending'
+        ? `<button class="btn-secondary" style="padding:4px 10px; font-size:12px; color:var(--warning); margin-right:4px;" onclick="cancelScheduledNotification('${escapeHtml(item.id)}')">Cancel</button>`
+        : '';
+      return `
+        <tr>
+          <td><input type="checkbox" data-scheduled-select="${escapeHtml(item.id)}" ${checked}></td>
+          <td>
+            <div>${escapeHtml(formatNotifTimestamp(item.scheduledAt))}</div>
+            <div class="user-sub">${escapeHtml(notifBodyPreview(item.body))}</div>
+          </td>
+          <td>
+            <span class="badge target">${escapeHtml(notifTargetLabel(item.target))}</span>
+            ${recipients ? `<div class="user-sub">${escapeHtml(recipients)}</div>` : ''}
+          </td>
+          <td><div class="user-name">${escapeHtml(item.title)}</div></td>
+          <td>${escapeHtml(notifRecurringLabel(item))}</td>
+          <td><span class="badge ${escapeHtml(item.status)}">${escapeHtml(notifStatusLabel(item.status))}</span></td>
+          <td>
+            ${cancelBtn}
+            <button class="btn-secondary" style="padding:4px 10px; font-size:12px; color:var(--danger);" onclick="deleteScheduledNotification('${escapeHtml(item.id)}')">Delete</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('[data-scheduled-select]').forEach(checkbox => {
+      checkbox.addEventListener('change', event => {
+        const id = event.target.getAttribute('data-scheduled-select');
+        if (event.target.checked) notifState.scheduledSelection.add(id);
+        else notifState.scheduledSelection.delete(id);
+        renderNotifScheduledSelectionBar();
+      });
+    });
+  }
+
+  renderNotifScheduledSelectionBar();
+}
+
+function renderNotifScheduledSelectionBar() {
+  const count = notifState.scheduledSelection.size;
+  document.getElementById('notifScheduledSelectionBar').style.display = count > 0 ? 'flex' : 'none';
+  document.getElementById('notifScheduledSelectedCount').textContent = `${count} selected`;
+  const selectAll = document.getElementById('notifScheduledSelectAll');
+  selectAll.checked = count > 0 && count === notifState.scheduled.length;
+}
+
+window.openScheduleNotifModal = function() {
+  document.getElementById('scheduleNotifForm').reset();
+  schedulePicker.clear();
+  schedulePicker.setVisible(false);
+
+  document.getElementById('scheduleTargetGroup').querySelectorAll('.segment').forEach(segment => {
+    segment.classList.toggle('active', segment.getAttribute('data-target') === 'all_users');
+  });
+  document.getElementById('scheduleRecurringType').querySelectorAll('.segment').forEach(segment => {
+    segment.classList.toggle('active', segment.getAttribute('data-recurring') === 'daily');
+  });
+  document.getElementById('scheduleRecurringTypeGroup').style.display = 'none';
+
+  // Default to one hour from now, and never allow a past slot.
+  document.getElementById('scheduleAt').value = getDhakaDateTimeLocal(60);
+  document.getElementById('scheduleAt').min = getDhakaDateTimeLocal(1);
+
+  const modal = document.getElementById('scheduleNotifModal');
+  modal.style.display = 'flex';
+  modal.classList.add('active');
+};
+
+window.closeScheduleNotifModal = function() {
+  const modal = document.getElementById('scheduleNotifModal');
+  modal.classList.remove('active');
+  modal.style.display = 'none';
+};
+
+async function handleScheduleNotification(event) {
+  event.preventDefault();
+
+  const target = getSegmentValue('scheduleTargetGroup', 'target') || 'all_users';
+  const isRecurring = document.getElementById('scheduleRecurring').checked;
+  const scheduledAt = document.getElementById('scheduleAt').value;
+
+  if (target === 'selected_users' && schedulePicker.uids().length === 0) {
+    alert('Please search and select at least one employee.');
+    return;
+  }
+  if (!scheduledAt) {
+    alert('Scheduled time is required.');
+    return;
+  }
+
+  const payload = {
+    target,
+    title: document.getElementById('scheduleTitle').value.trim(),
+    body: document.getElementById('scheduleBody').value.trim(),
+    // Interpreted as Dhaka wall-clock time by the API, like every other date
+    // this dashboard submits.
+    scheduledAt,
+    imageUrl: document.getElementById('scheduleImageUrl').value.trim(),
+    actionUrl: document.getElementById('scheduleActionUrl').value.trim(),
+    isRecurring
+  };
+  if (target === 'selected_users') payload.recipientUids = schedulePicker.uids();
+  if (isRecurring) payload.recurringType = getSegmentValue('scheduleRecurringType', 'recurring') || 'daily';
+
+  setBtnLoading('btnSaveSchedule', true);
+
+  try {
+    const res = await fetch('/api/notifications/schedule', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      closeScheduleNotifModal();
+      fetchScheduledNotifications();
+    } else {
+      alert(data.message || 'Failed to schedule notification.');
+    }
+  } catch (err) {
+    console.error('Error scheduling notification:', err);
+    alert('Could not connect to server.');
+  } finally {
+    setBtnLoading('btnSaveSchedule', false);
+  }
+}
+
+window.cancelScheduledNotification = async function(notificationId) {
+  if (!confirm('Cancel this scheduled notification?')) return;
+
+  try {
+    const res = await fetch('/api/notifications/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notificationId })
+    });
+    const data = await res.json();
+    if (data.success) fetchScheduledNotifications();
+    else alert(data.message || 'Failed to cancel notification.');
+  } catch (err) {
+    console.error('Error cancelling scheduled notification:', err);
+    alert('Could not connect to server.');
+  }
+};
+
+window.deleteScheduledNotification = function(notificationId) {
+  deleteNotifications([notificationId], 'scheduled_notifications');
+};
+
+async function runDueScheduledNotifications() {
+  setBtnLoading('btnRunScheduled', true);
+  try {
+    const res = await fetch('/api/notifications/run-scheduled', { method: 'POST' });
+    const data = await res.json();
+    alert(data.message || 'Done.');
+    fetchScheduledNotifications();
+    fetchNotificationHistory();
+  } catch (err) {
+    console.error('Error running scheduled notifications:', err);
+    alert('Could not connect to server.');
+  } finally {
+    setBtnLoading('btnRunScheduled', false);
+  }
+}
+

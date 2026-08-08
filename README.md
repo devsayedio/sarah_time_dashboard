@@ -9,9 +9,10 @@ An enterprise attendance management and policy control dashboard for **Sarah Tim
 - **Office & Geofence Policy**: Configure office coordinates (Latitude, Longitude), allowed radius, shift start/end times, and late thresholds.
 - **Interactive Map**: Visualizes the office location and geofence boundary using Leaflet.js.
 - **Date Overrides**: Add custom holidays or special workdays.
+- **Push Notifications**: Send an FCM push to all employees or a selected few, review a filterable and paginated delivery history, and schedule one-time or recurring (daily/weekly/monthly) notifications. Due notifications are dispatched by an in-process scheduler that runs every minute.
 
 ## Tech Stack
-- **Backend**: Node.js, Express, Firebase Admin SDK
+- **Backend**: Node.js, Express, Firebase Admin SDK (Firestore + Cloud Messaging)
 - **Frontend**: HTML5, Vanilla CSS (Dark Theme + Glassmorphism), JavaScript (ES6+), Leaflet.js
 - **Database**: Cloud Firestore (`employee-attendance-30f81`)
 
@@ -20,3 +21,5 @@ An enterprise attendance management and policy control dashboard for **Sarah Tim
 npm start
 ```
 The dashboard will be available at `http://localhost:3000`.
+
+> Run only one instance at a time. Each process starts its own scheduled-notification worker, so two instances can dispatch the same scheduled notification twice.
