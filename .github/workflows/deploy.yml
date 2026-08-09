@@ -77,6 +77,12 @@ jobs:
       - name: Syntax check
         run: npm run check --if-present
 
+      - name: Generate build metadata
+        env:
+          DEPLOY_COMMIT: ${{ github.sha }}
+          DEPLOY_ENV: production
+        run: npm run build:info
+
       #---------------------------------------------------
       # SSH SETUP
       #---------------------------------------------------

@@ -68,7 +68,15 @@
     </ul>
 
     <div class="sidebar-footer">
-      <p>Sarah Time Admin v1.0</p>      <p style="margin-top:4px; font-size:11px; opacity:0.7;">Dhaka Time (Asia/Dhaka)</p>
+      <button type="button" id="buildInfoTrigger" class="build-info-trigger" aria-haspopup="dialog" aria-controls="buildInfoModal">
+        <span class="build-product">Sarah Time Admin</span>
+        <span class="build-summary">
+          <span id="appVersion">v1.0.0</span>
+          <span aria-hidden="true">&bull;</span>
+          <span id="appBuildNumber">Loading build...</span>
+        </span>
+        <span class="build-timezone">Dhaka Time (Asia/Dhaka)</span>
+      </button>
     </div>
   </aside>
 
@@ -856,8 +864,47 @@
     </div>
   </div>
 
+  <!-- Build Information Modal -->
+  <div id="buildInfoModal" class="modal-overlay" style="display:none;" aria-hidden="true">
+    <div class="modal-box build-info-modal" role="dialog" aria-modal="true" aria-labelledby="buildInfoTitle">
+      <div class="modal-header">
+        <div>
+          <h3 id="buildInfoTitle">Build Information</h3>
+          <p class="build-info-subtitle">Currently running dashboard release</p>
+        </div>
+        <button type="button" class="close-btn" id="closeBuildInfoBtn" aria-label="Close build information">&times;</button>
+      </div>
+      <dl class="build-detail-list">
+        <div class="build-detail-row">
+          <dt>Version</dt>
+          <dd id="buildVersionDetail">1.0.0</dd>
+        </div>
+        <div class="build-detail-row">
+          <dt>Build</dt>
+          <dd id="buildNumberDetail">Loading...</dd>
+        </div>
+        <div class="build-detail-row">
+          <dt>Commit</dt>
+          <dd id="buildCommitDetail">Loading...</dd>
+        </div>
+        <div class="build-detail-row">
+          <dt>Environment</dt>
+          <dd id="buildEnvironmentDetail">Loading...</dd>
+        </div>
+        <div class="build-detail-row">
+          <dt>Deployed at</dt>
+          <dd id="buildDeployedAtDetail">Loading...</dd>
+        </div>
+      </dl>
+      <div class="build-info-actions">
+        <button type="button" class="btn-secondary" id="copyBuildInfoBtn">Copy Build Info</button>
+        <button type="button" class="btn-primary" id="dismissBuildInfoBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Scripts -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="js/app.js?v=10"></script>
+  <script src="js/app.js?v=11"></script>
 </body>
 </html>

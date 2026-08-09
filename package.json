@@ -4,7 +4,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/js/app.js && node --check scripts/migrate-firestore-schema.js",
+    "build:info": "node scripts/generate-build-info.js",
+    "check": "node --check server.js && node --check public/js/app.js && node --check scripts/generate-build-info.js && node --check scripts/migrate-firestore-schema.js",
     "migrate:firestore:dry-run": "node scripts/migrate-firestore-schema.js",
     "migrate:firestore": "node scripts/migrate-firestore-schema.js --apply"
   },

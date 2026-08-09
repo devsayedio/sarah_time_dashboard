@@ -1,9 +1,11 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
+const packageInfo = require('./package.json');
 
 // Initialize Firebase Admin SDK using local service account
 const serviceAccount = require('./service-account.json');
@@ -18,6 +20,47 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const EMPLOYEES = 'employees';
 const ATTENDANCE = 'attendance';
+const BUILD_INFO_PATH = path.join(__dirname, 'build-info.json');
+
+function buildInfoValue(value, fallback) {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function readBuildInfo() {
+  let generatedInfo = {};
+
+  try {
+    generatedInfo = JSON.parse(fs.readFileSync(BUILD_INFO_PATH, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn(`Could not read build metadata: ${error.message}`);
+    }
+  }
+
+  const commit = buildInfoValue(
+    process.env.DEPLOY_COMMIT,
+    buildInfoValue(generatedInfo.commit, 'unavailable')
+  );
+
+  return Object.freeze({
+    version: packageInfo.version,
+    buildNumber: buildInfoValue(
+      process.env.BUILD_NUMBER,
+      buildInfoValue(generatedInfo.buildNumber, 'development')
+    ),
+    commit: commit === 'unavailable' ? commit : commit.slice(0, 7),
+    environment: buildInfoValue(
+      process.env.DEPLOY_ENV,
+      buildInfoValue(generatedInfo.environment, process.env.NODE_ENV || 'development')
+    ),
+    deployedAt: buildInfoValue(
+      process.env.DEPLOYED_AT,
+      buildInfoValue(generatedInfo.deployedAt, null)
+    )
+  });
+}
+
+const BUILD_INFO = readBuildInfo();
 
 // The Flutter app parses every profile field with a strict `String` check and
 // `joiningDate` as a `Timestamp`. A missing field throws a FormatException and
@@ -73,7 +116,15 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Deployment health probe. The CI pipeline polls this after restarting PM2 and
 // fails the run if it never turns healthy, so keep it free of Firestore calls.
 app.get('/healthz', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
+  res.set('Cache-Control', 'no-store');
+  res.json({ status: 'ok', uptime: process.uptime(), ...BUILD_INFO });
+});
+
+// Public release identity for the dashboard footer and operational checks.
+// It intentionally exposes only non-sensitive artifact metadata.
+app.get('/version', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(BUILD_INFO);
 });
 
 // Helper: Get Dhaka Date Key (YYYY-MM-DD)

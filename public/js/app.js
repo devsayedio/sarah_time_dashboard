@@ -10,6 +10,7 @@ let state = {
   dateOverrides: [],
   dashboardDate: null,
   settingsLoaded: false,
+  buildInfo: null,
   map: null,
   mapMarker: null,
   mapCircle: null
@@ -28,6 +29,7 @@ function getTodayDhakaDate() {
 
 document.addEventListener('DOMContentLoaded', () => {
   initUI();
+  loadBuildInfo();
   loadDashboardData();
 });
 
@@ -93,6 +95,21 @@ function initUI() {
   document.getElementById('btnDeleteEmployee').addEventListener('click', handleEmployeeDelete);
   
   document.getElementById('btnEditEmployeeToggle').addEventListener('click', toggleEmployeeEditMode);
+
+  const buildInfoTrigger = document.getElementById('buildInfoTrigger');
+  const buildInfoModal = document.getElementById('buildInfoModal');
+  buildInfoTrigger?.addEventListener('click', openBuildInfoModal);
+  document.getElementById('closeBuildInfoBtn')?.addEventListener('click', closeBuildInfoModal);
+  document.getElementById('dismissBuildInfoBtn')?.addEventListener('click', closeBuildInfoModal);
+  document.getElementById('copyBuildInfoBtn')?.addEventListener('click', copyBuildInfo);
+  buildInfoModal?.addEventListener('click', event => {
+    if (event.target === buildInfoModal) closeBuildInfoModal();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && buildInfoModal?.classList.contains('active')) {
+      closeBuildInfoModal();
+    }
+  });
   
   document.getElementById('editAttendanceForm').addEventListener('submit', handleAttendanceEditSubmit);
   
@@ -117,6 +134,108 @@ function initUI() {
       localStorage.setItem('appTheme', newTheme);
     });
   }
+}
+
+function normalizeBuildInfo(data = {}) {
+  const valueOr = (value, fallback) => (
+    typeof value === 'string' && value.trim() ? value.trim() : fallback
+  );
+
+  return {
+    version: valueOr(data.version, '1.0.0'),
+    buildNumber: valueOr(data.buildNumber, 'unavailable'),
+    commit: valueOr(data.commit, 'unavailable'),
+    environment: valueOr(data.environment, 'development'),
+    deployedAt: valueOr(data.deployedAt, '')
+  };
+}
+
+function formatBuildDate(isoDate) {
+  if (!isoDate) return 'Unavailable';
+
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) return isoDate;
+
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Dhaka',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  }).format(date);
+}
+
+function renderBuildInfo(buildInfo) {
+  const displayValue = value => value === 'unavailable' ? 'Unavailable' : value;
+  const environment = buildInfo.environment.charAt(0).toUpperCase() + buildInfo.environment.slice(1);
+
+  document.getElementById('appVersion').textContent = `v${buildInfo.version}`;
+  document.getElementById('appBuildNumber').textContent = `Build ${displayValue(buildInfo.buildNumber)}`;
+  document.getElementById('buildVersionDetail').textContent = buildInfo.version;
+  document.getElementById('buildNumberDetail').textContent = displayValue(buildInfo.buildNumber);
+  document.getElementById('buildCommitDetail').textContent = displayValue(buildInfo.commit);
+  document.getElementById('buildEnvironmentDetail').textContent = environment;
+  document.getElementById('buildDeployedAtDetail').textContent = formatBuildDate(buildInfo.deployedAt);
+}
+
+async function loadBuildInfo() {
+  try {
+    const response = await fetch('/version', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Version request failed with ${response.status}`);
+    state.buildInfo = normalizeBuildInfo(await response.json());
+  } catch (error) {
+    console.warn('Build information is unavailable:', error);
+    state.buildInfo = normalizeBuildInfo();
+  }
+
+  renderBuildInfo(state.buildInfo);
+}
+
+function openBuildInfoModal() {
+  const modal = document.getElementById('buildInfoModal');
+  if (!modal) return;
+
+  modal.style.display = 'flex';
+  modal.classList.add('active');
+  modal.setAttribute('aria-hidden', 'false');
+  document.getElementById('closeBuildInfoBtn')?.focus();
+}
+
+function closeBuildInfoModal() {
+  const modal = document.getElementById('buildInfoModal');
+  if (!modal) return;
+
+  modal.classList.remove('active');
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  document.getElementById('buildInfoTrigger')?.focus();
+}
+
+async function copyBuildInfo() {
+  const buildInfo = state.buildInfo || normalizeBuildInfo();
+  const summary = [
+    `Version: ${buildInfo.version}`,
+    `Build: ${buildInfo.buildNumber}`,
+    `Commit: ${buildInfo.commit}`,
+    `Environment: ${buildInfo.environment}`,
+    `Deployed at: ${formatBuildDate(buildInfo.deployedAt)} (Asia/Dhaka)`
+  ].join('\n');
+  const button = document.getElementById('copyBuildInfoBtn');
+
+  try {
+    await navigator.clipboard.writeText(summary);
+    if (button) button.textContent = 'Copied';
+  } catch (error) {
+    console.warn('Could not copy build information:', error);
+    if (button) button.textContent = 'Copy failed';
+  }
+
+  setTimeout(() => {
+    if (button) button.textContent = 'Copy Build Info';
+  }, 1600);
 }
 
 function switchTab(tabName) {
