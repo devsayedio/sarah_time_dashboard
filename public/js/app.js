@@ -323,7 +323,7 @@ function renderDashSummary() {
             <div class="user-avatar">${initial}</div>
             <div>
               <div class="user-name">${name}</div>
-              <div class="user-sub">${p.employeeId || emp.employeeCode}</div>
+              <div class="user-sub">${p.employeeId || emp.id}</div>
             </div>
           </div>
         </td>
@@ -348,7 +348,7 @@ function renderAttendanceLogs() {
   const statusFilter = document.getElementById('attStatusFilter').value;
 
   const filtered = state.attendanceLogs.filter(log => {
-    const matchesSearch = log.employeeName.toLowerCase().includes(query) || log.employeeCode.toLowerCase().includes(query);
+    const matchesSearch = log.employeeName.toLowerCase().includes(query) || log.employeeId.toLowerCase().includes(query);
     const matchesStatus = statusFilter === 'all' || log.status === statusFilter;
     return matchesSearch && matchesStatus;
   });
@@ -365,7 +365,7 @@ function renderAttendanceLogs() {
         <td>
           <div class="user-name">${log.employeeName}</div>
         </td>
-        <td>${log.employeeCode}</td>
+        <td>${log.employeeId}</td>
         <td>${log.department}</td>
         <td>${log.checkInAt}</td>
         <td>${log.checkOutAt}</td>
@@ -387,8 +387,8 @@ function renderEmployeeDirectory() {
 
   const filtered = state.employees.filter(emp => {
     const name = (emp.profile.employeeName || emp.authEmail).toLowerCase();
-    const code = (emp.profile.employeeId || emp.employeeCode).toLowerCase();
-    return name.includes(query) || code.includes(query);
+    const employeeId = (emp.profile.employeeId || emp.id).toLowerCase();
+    return name.includes(query) || employeeId.includes(query);
   });
 
   if (filtered.length === 0) {
@@ -412,7 +412,7 @@ function renderEmployeeDirectory() {
             </div>
           </div>
         </td>
-        <td>${p.employeeId || emp.employeeCode}</td>
+        <td>${p.employeeId || emp.id}</td>
         <td>${emp.authEmail}</td>
         <td>${p.department || 'N/A'}</td>
         <td>
@@ -469,7 +469,7 @@ window.openAddEmployee = function() {
   if (state.employees && state.employees.length > 0) {
     const ids = state.employees
       .map(e => {
-        const idStr = (e.profile?.employeeId || e.employeeCode || '');
+        const idStr = e.profile?.employeeId || '';
         if (idStr.startsWith('ST')) {
           return parseInt(idStr.substring(2), 10) || 0;
         }
@@ -522,7 +522,7 @@ window.viewEmployeeProfile = function(empId) {
   document.getElementById('editEmpPermanentAddress').value = p.permanentAddress || '';
 
   // Job Info
-  document.getElementById('editEmpId').value = p.employeeId || emp.employeeCode || '';
+  document.getElementById('editEmpId').value = p.employeeId || '';
   document.getElementById('editEmpDesignation').value = p.designation || '';
   document.getElementById('editEmpDepartment').value = p.department || '';
   document.getElementById('editEmpType').value = p.employmentType || '';
@@ -1180,8 +1180,8 @@ function employeeDisplayName(emp) {
   return (emp.profile && emp.profile.employeeName) || emp.authEmail || emp.id;
 }
 
-function employeeDisplayCode(emp) {
-  return (emp.profile && emp.profile.employeeId) || emp.employeeCode || emp.id;
+function employeeDisplayId(emp) {
+  return (emp.profile && emp.profile.employeeId) || emp.id;
 }
 
 // ─── Recipient picker ─────────────────────────────────────────────────
@@ -1228,7 +1228,7 @@ function createRecipientPicker(ids, onChange) {
       .filter(emp => {
         const haystack = [
           employeeDisplayName(emp),
-          employeeDisplayCode(emp),
+          employeeDisplayId(emp),
           emp.authEmail || '',
           emp.profile?.officialEmail || ''
         ].join(' ').toLowerCase();
@@ -1254,7 +1254,7 @@ function createRecipientPicker(ids, onChange) {
           <div class="user-avatar" style="width:28px; height:28px; font-size:12px;">${escapeHtml(name.charAt(0).toUpperCase())}</div>
           <div style="flex:1;">
             <div class="user-name" style="font-size:13px;">${escapeHtml(name)}</div>
-            <div class="user-sub">${escapeHtml(employeeDisplayCode(emp))} &bull; ${escapeHtml(emp.authEmail || '')}</div>
+            <div class="user-sub">${escapeHtml(employeeDisplayId(emp))} &bull; ${escapeHtml(emp.authEmail || '')}</div>
           </div>
           ${inactive}
           ${noDevice}

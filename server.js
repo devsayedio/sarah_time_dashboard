@@ -195,14 +195,14 @@ function attendanceForDashboard(data) {
   };
 }
 
-function attendanceLog(employeeId, employeeData, dateKey, attendance, holidayInfo) {
+function attendanceLog(employeeUid, employeeData, dateKey, attendance, holidayInfo) {
   const isActive = employeeData.isActive !== false;
   if (!attendance && !isActive) return null;
 
   return {
-    id: employeeId,
+    id: employeeUid,
     employeeName: employeeData.employeeName || employeeData.authEmail || 'Unknown',
-    employeeCode: employeeData.employeeId || employeeData.employeeCode || employeeId,
+    employeeId: employeeData.employeeId || employeeUid,
     designation: employeeData.designation || 'N/A',
     department: employeeData.department || 'N/A',
     dateKey,
@@ -276,7 +276,6 @@ async function loadDailyDashboard(dateKey) {
     employees.push({
       id: doc.id,
       authEmail: employeeData.authEmail || employeeData.personalEmail || 'N/A',
-      employeeCode: employeeData.employeeCode || employeeData.employeeId || doc.id,
       isActive,
       hasFcmToken: Boolean(employeeData.fcmToken),
       profile: employeeProfile(employeeData),
@@ -357,7 +356,6 @@ app.get('/api/employees', async (req, res) => {
       employees.push({
         id: empId,
         authEmail: empData.authEmail || empData.personalEmail || 'N/A',
-        employeeCode: empData.employeeCode || empData.employeeId || empId,
         isActive: empData.isActive !== false,
         hasFcmToken: Boolean(empData.fcmToken),
         profile: employeeProfile(empData),
@@ -396,7 +394,7 @@ app.post('/api/employees/:id/toggle-status', async (req, res) => {
 // API 3.0: Create New Employee (with Firebase Auth)
 app.post('/api/employees', async (req, res) => {
   try {
-    const { employeeName, personalEmail, employeeId, joiningDate } = req.body;
+    const { employeeName, personalEmail, joiningDate } = req.body;
 
     const emailToUse = personalEmail;
     if (!emailToUse) {
@@ -437,8 +435,7 @@ app.post('/api/employees', async (req, res) => {
     const employeeData = {
       ...profileData,
       isActive: true,
-      authEmail: emailToUse,
-      employeeCode: toProfileString(employeeId)
+      authEmail: emailToUse
     };
 
     await db.collection(EMPLOYEES).doc(uid).set(employeeData);
@@ -454,7 +451,7 @@ app.post('/api/employees', async (req, res) => {
 app.put('/api/employees/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { employeeId, joiningDate } = req.body;
+    const { joiningDate } = req.body;
 
     const employeeReference = db.collection(EMPLOYEES).doc(id);
     const employeeSnap = await employeeReference.get();
@@ -485,8 +482,6 @@ app.put('/api/employees/:id', async (req, res) => {
     const mainEmpData = {
       updatedAt: FieldValue.serverTimestamp()
     };
-    if (employeeId) mainEmpData.employeeCode = String(employeeId);
-
     if (typeof existingEmployee.isActive !== 'boolean') {
       mainEmpData.isActive = true;
     }
