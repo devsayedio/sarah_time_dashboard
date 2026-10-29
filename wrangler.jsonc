@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sarah-time-dashboard",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-29",
+  "upload_source_maps": true,
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "sarah-time-dashboard.royalcourtbd.com/*",
+      "zone_name": "royalcourtbd.com"
+    }
+  ],
+  "define": {
+    "__dirname": "\"/\""
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "DEPLOY_ENV": "production"
+  }
+}

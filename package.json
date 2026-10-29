@@ -4,8 +4,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
+    "deploy:cloudflare": "npm run check && npm run build:info && wrangler deploy",
+    "dev:cloudflare": "wrangler dev",
     "build:info": "node scripts/generate-build-info.js",
-    "check": "node --check server.js && node --check public/js/app.js && node --check scripts/generate-build-info.js && node --check scripts/migrate-firestore-schema.js",
+    "check": "node --check server.js && node --check worker.mjs && node --check cloudflare/firestore-rest.js && node --check public/js/app.js && node --check scripts/generate-build-info.js && node --check scripts/migrate-firestore-schema.js",
     "migrate:firestore:dry-run": "node scripts/migrate-firestore-schema.js",
     "migrate:firestore": "node scripts/migrate-firestore-schema.js --apply"
   },
@@ -18,5 +20,8 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "firebase-admin": "^14.2.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.155.0"
   }
 }

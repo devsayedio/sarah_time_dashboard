@@ -3,19 +3,48 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { initializeApp, cert } = require('firebase-admin/app');
-const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
 const packageInfo = require('./package.json');
 
-// Initialize Firebase Admin SDK using local service account
-const serviceAccount = require('./service-account.json');
+const isCloudflareWorker = globalThis.__SARAH_CLOUDFLARE_WORKER__ === true;
+const firestoreRuntime = isCloudflareWorker
+  ? require('./cloudflare/firestore-rest')
+  : require('firebase-admin/firestore');
+const { FieldValue, Timestamp } = firestoreRuntime;
 
-initializeApp({
+function loadServiceAccount() {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    return JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+  }
+
+  return JSON.parse(
+    fs.readFileSync(path.join(__dirname, 'service-account.json'), 'utf8')
+  );
+}
+
+// Local Node.js reads the gitignored file. Cloudflare receives the same JSON as
+// an encrypted Worker secret and never bundles the credential into the script.
+const serviceAccount = loadServiceAccount();
+
+const firebaseApp = initializeApp({
   credential: cert(serviceAccount),
   projectId: 'employee-attendance-30f81'
 });
 
-const db = getFirestore();
+let db;
+
+function ensureFirebaseInitialized() {
+  if (!db) {
+    db = isCloudflareWorker
+      ? firestoreRuntime.createFirestoreRest(firebaseApp, 'employee-attendance-30f81')
+      : firestoreRuntime.getFirestore(firebaseApp);
+  }
+  return db;
+}
+
+if (!isCloudflareWorker) {
+  ensureFirebaseInitialized();
+}
 const app = express();
 const PORT = process.env.PORT || 3000;
 const EMPLOYEES = 'employees';
@@ -111,10 +140,12 @@ function toJoiningTimestamp(value) {
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+if (!isCloudflareWorker) {
+  app.use(express.static(path.join(__dirname, 'public')));
+}
 
-// Deployment health probe. The CI pipeline polls this after restarting PM2 and
-// fails the run if it never turns healthy, so keep it free of Firestore calls.
+// Deployment health probe. Keep it free of Firestore calls so Cloudflare and
+// operational checks can verify the runtime without consuming database reads.
 app.get('/healthz', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ status: 'ok', uptime: process.uptime(), ...BUILD_INFO });
@@ -641,7 +672,7 @@ app.put('/api/attendance/edit', async (req, res) => {
       const dhakaDateStr = `${dateKey}T${timeStr}:00+06:00`;
       const dateObj = new Date(dhakaDateStr);
       if (isNaN(dateObj.getTime())) return null;
-      return require('firebase-admin/firestore').Timestamp.fromDate(dateObj);
+      return Timestamp.fromDate(dateObj);
     };
 
     // Fetch office policy to calculate proper status (same logic as Flutter classifyCheckIn)
@@ -1522,6 +1553,14 @@ async function scheduledNotificationTick() {
 
 app.listen(PORT, () => {
   console.log(`Sarah Time Admin Dashboard running on http://localhost:${PORT}`);
-  scheduledNotificationTick();
-  setInterval(scheduledNotificationTick, SCHEDULER_TICK_MS);
+  if (!isCloudflareWorker) {
+    scheduledNotificationTick();
+    setInterval(scheduledNotificationTick, SCHEDULER_TICK_MS);
+  }
 });
+
+module.exports = {
+  app,
+  ensureFirebaseInitialized,
+  processDueScheduledNotifications
+};
