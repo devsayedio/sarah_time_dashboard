@@ -8,7 +8,7 @@ The Worker provides:
 - Express API execution through Cloudflare's Node.js HTTP bridge
 - static frontend delivery through Workers Assets
 - encrypted Firebase and Basic Auth secrets
-- a five-minute Cron Trigger for scheduled notifications
+- a five-minute Cron Trigger for bounded scheduled-notification checks
 - shared dashboard/settings caching through Cloudflare KV
 - the same Firebase project and API response contracts used by the mobile app
 
@@ -26,6 +26,7 @@ Required encrypted Worker secrets:
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | Firebase Admin service-account JSON |
 | `BASIC_AUTH_USERNAME` | Dashboard Basic Auth username |
 | `BASIC_AUTH_PASSWORD` | Dashboard Basic Auth password |
+| `FCM_DISPATCH_SECRET` | Shared secret for the Firebase multicast dispatcher |
 
 Required KV binding:
 
@@ -39,6 +40,7 @@ Set or rotate a secret without putting it in git:
 npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON < service-account.json
 npx wrangler secret put BASIC_AUTH_USERNAME
 npx wrangler secret put BASIC_AUTH_PASSWORD
+npx wrangler secret put FCM_DISPATCH_SECRET
 ```
 
 ## Manual deployment
@@ -135,9 +137,61 @@ Stream production logs:
 npx wrangler tail sarah-time-dashboard --format pretty
 ```
 
-The Cron Trigger runs `processDueScheduledNotifications()` every five minutes.
-Only one production scheduler should be active, otherwise a due notification
-can be dispatched twice.
+The Cron Trigger runs a bounded due query every five minutes. An empty query is
+one Firestore document read, so the idle scheduler uses about 288 reads per day
+(roughly 0.6% of the 50,000 daily free-read allowance) regardless of employee
+count.
+
+Due schedules are claimed with a Firestore update-time precondition and a
+ten-minute lease. Failed deliveries retry with bounded backoff, while recurring
+schedules reuse the same document. A stable `occurrenceId` plus Android/iOS
+collapse metadata limits duplicate user-visible delivery if a Worker stops
+after FCM accepts a message but before Firestore is finalized.
+
+Attendance-aware schedules intentionally read Firestore only when their
+occurrence becomes due:
+
+- `office_check_in_reminder` reads that day's attendance and active employees,
+  then skips employees who already checked in.
+- `office_check_out_reminder` reads that day's attendance and resolves only
+  checked-in employees who have not checked out.
+- when nobody needs the reminder, the occurrence succeeds as a no-op and does
+  not retry.
+- weekly off-days and closed date overrides also succeed as no-ops before any
+  attendance or employee scan.
+
+`office_broadcast` is for non-sensitive office-wide messages. It publishes to
+the `active_office_employees` FCM topic without reading every employee. Topic
+membership is maintained by the `syncEmployeeBroadcastTopic` Firebase Function
+in the main Sarah Time app repository. Deploy the Function before deploying a
+dashboard version that uses this target, then perform the one-time existing
+token reconciliation:
+
+Both the dashboard Firebase Admin service account and the Function runtime
+service account require the least-privilege `roles/cloudmessaging.editor` role
+for topic subscription management.
+
+Cloudflare sends one authenticated request to the
+`dispatchDashboardNotification` Firebase Function. The Function performs the
+FCM multicast in Google infrastructure, so a 500-employee reminder does not
+consume 500 Cloudflare external subrequests. Its Secret Manager value must
+match the Worker's `FCM_DISPATCH_SECRET`:
+
+```bash
+cd /Users/sayed/Documents/GitHub/sarah_time
+npx firebase-tools functions:secrets:set DASHBOARD_DISPATCH_SECRET \
+  --project employee-attendance-30f81
+```
+
+```bash
+cd /Users/sayed/Documents/GitHub/sarah_time
+npx firebase-tools deploy \
+  --only functions:syncEmployeeBroadcastTopic,functions:dispatchDashboardNotification \
+  --project employee-attendance-30f81
+```
+
+The Flutter app must also be rebuilt and installed for its local notification
+inbox to deduplicate retries by `occurrenceId`.
 
 ## Rollback
 
