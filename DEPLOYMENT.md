@@ -91,6 +91,23 @@ TTL is the freshness safety net for those writes.
 Inspect cache behaviour on an authenticated dashboard response with the
 `X-Dashboard-Cache` header (`MISS`, `HIT` or `BYPASS`).
 
+## Dashboard routes
+
+The dashboard uses History API routes while remaining a single-page app:
+
+- `/overview`
+- `/attendance`
+- `/employees`
+- `/employees/new`
+- `/employees/{employeeId}`
+- `/notifications`
+- `/settings`
+
+Cloudflare Workers Assets uses `single-page-application` fallback so direct
+links and browser refreshes return the authenticated dashboard shell. Local
+Node.js development serves the same shell for these known routes only; API 404
+responses and unknown local paths are not masked by the SPA fallback.
+
 ## Verification
 
 Unauthenticated access must remain blocked:
