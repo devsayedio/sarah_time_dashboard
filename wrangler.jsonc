@@ -30,6 +30,7 @@
     "crons": ["*/5 * * * *"]
   },
   "vars": {
-    "DEPLOY_ENV": "production"
+    "DEPLOY_ENV": "production",
+    "FCM_DISPATCH_URL": "https://us-central1-employee-attendance-30f81.cloudfunctions.net/dispatchDashboardNotification"
   }
 }

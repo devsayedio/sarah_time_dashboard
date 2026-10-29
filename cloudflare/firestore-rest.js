@@ -1,5 +1,6 @@
 class RestTimestamp {
   constructor(value) {
+    this.rawValue = typeof value === 'string' ? value : null;
     this.value = value instanceof Date ? value : new Date(value);
   }
 
@@ -7,8 +8,16 @@ class RestTimestamp {
     return new RestTimestamp(value);
   }
 
+  static fromISOString(value) {
+    return new RestTimestamp(value);
+  }
+
   toDate() {
     return new Date(this.value.getTime());
+  }
+
+  toISOString() {
+    return this.rawValue || this.value.toISOString();
   }
 }
 
@@ -29,10 +38,13 @@ function encodeValue(value) {
     return { timestampValue: new Date().toISOString() };
   }
   if (value instanceof RestTimestamp) {
-    return { timestampValue: value.toDate().toISOString() };
+    return { timestampValue: value.toISOString() };
   }
   if (value instanceof Date) {
     return { timestampValue: value.toISOString() };
+  }
+  if (value instanceof RestDocumentReference) {
+    return { referenceValue: value.database.documentName(value.path) };
   }
   if (value === null) return { nullValue: null };
   if (typeof value === 'string') return { stringValue: value };
@@ -101,6 +113,12 @@ class RestDocumentSnapshot {
   data() {
     return this.exists ? decodeFields(this.document.fields || {}) : undefined;
   }
+
+  get updateTime() {
+    return this.document?.updateTime
+      ? new RestTimestamp(this.document.updateTime)
+      : null;
+  }
 }
 
 class RestQuerySnapshot {
@@ -135,8 +153,8 @@ class RestDocumentReference {
     return this.database.setDocument(this.path, data, Boolean(options.merge));
   }
 
-  update(data) {
-    return this.database.setDocument(this.path, data, true);
+  update(data, precondition = {}) {
+    return this.database.setDocument(this.path, data, true, precondition);
   }
 
   delete() {
@@ -145,12 +163,20 @@ class RestDocumentReference {
 }
 
 class RestQuery {
-  constructor(database, path, filters = [], orderings = [], resultLimit = null) {
+  constructor(
+    database,
+    path,
+    filters = [],
+    orderings = [],
+    resultLimit = null,
+    startAfterValues = []
+  ) {
     this.database = database;
     this.path = path;
     this.filters = filters;
     this.orderings = orderings;
     this.resultLimit = resultLimit;
+    this.startAfterValues = startAfterValues;
   }
 
   where(fieldPath, operator, value) {
@@ -159,7 +185,8 @@ class RestQuery {
       this.path,
       [...this.filters, { fieldPath, operator, value }],
       this.orderings,
-      this.resultLimit
+      this.resultLimit,
+      this.startAfterValues
     );
   }
 
@@ -169,7 +196,8 @@ class RestQuery {
       this.path,
       this.filters,
       [...this.orderings, { fieldPath, direction }],
-      this.resultLimit
+      this.resultLimit,
+      this.startAfterValues
     );
   }
 
@@ -179,7 +207,19 @@ class RestQuery {
       this.path,
       this.filters,
       this.orderings,
-      Number(value)
+      Number(value),
+      this.startAfterValues
+    );
+  }
+
+  startAfter(...values) {
+    return new RestQuery(
+      this.database,
+      this.path,
+      this.filters,
+      this.orderings,
+      this.resultLimit,
+      values
     );
   }
 
@@ -188,7 +228,8 @@ class RestQuery {
       this.path,
       this.filters,
       this.orderings,
-      this.resultLimit
+      this.resultLimit,
+      this.startAfterValues
     );
   }
 }
@@ -218,8 +259,16 @@ class RestWriteBatch {
     this.writes = [];
   }
 
-  delete(reference) {
-    this.writes.push({ delete: this.database.documentName(reference.path) });
+  delete(reference, precondition = {}) {
+    const write = { delete: this.database.documentName(reference.path) };
+    if (precondition.lastUpdateTime) {
+      write.currentDocument = {
+        updateTime: precondition.lastUpdateTime instanceof RestTimestamp
+          ? precondition.lastUpdateTime.toISOString()
+          : new Date(precondition.lastUpdateTime).toISOString()
+      };
+    }
+    this.writes.push(write);
     return this;
   }
 
@@ -351,15 +400,23 @@ class FirestoreRestDatabase {
     }));
   }
 
-  async setDocument(path, data, merge) {
+  async setDocument(path, data, merge, precondition = {}) {
     const query = new URLSearchParams();
     if (merge) {
       for (const fieldPath of Object.keys(data)) {
         query.append('updateMask.fieldPaths', fieldPath);
       }
     }
+    if (precondition.lastUpdateTime) {
+      const updateTime = precondition.lastUpdateTime instanceof RestTimestamp
+        ? precondition.lastUpdateTime.toISOString()
+        : new Date(precondition.lastUpdateTime).toISOString();
+      query.set('currentDocument.updateTime', updateTime);
+    } else if (typeof precondition.exists === 'boolean') {
+      query.set('currentDocument.exists', String(precondition.exists));
+    }
     const suffix = query.size ? `?${query}` : '';
-    await this.request(`${this.apiRoot}/documents/${encodePath(path)}${suffix}`, {
+    return this.request(`${this.apiRoot}/documents/${encodePath(path)}${suffix}`, {
       method: 'PATCH',
       body: JSON.stringify({ fields: encodeFields(data) })
     });
@@ -386,7 +443,7 @@ class FirestoreRestDatabase {
     ));
   }
 
-  async runQuery(path, filters, orderings, resultLimit) {
+  async runQuery(path, filters, orderings, resultLimit, startAfterValues = []) {
     const segments = path.split('/');
     const collectionId = segments.at(-1);
     const parentPath = segments.slice(0, -1).join('/');
@@ -411,6 +468,12 @@ class FirestoreRestDatabase {
       }));
     }
     if (resultLimit !== null) structuredQuery.limit = resultLimit;
+    if (startAfterValues.length) {
+      structuredQuery.startAt = {
+        values: startAfterValues.map(encodeValue),
+        before: false
+      };
+    }
 
     const parentSuffix = parentPath ? `/${encodePath(parentPath)}` : '';
     const result = await this.request(
