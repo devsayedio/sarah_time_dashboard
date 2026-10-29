@@ -56,12 +56,19 @@ jobs:
       - name: Verify Basic Authentication boundary
         run: |
           set -euo pipefail
-          status=$(curl --silent --show-error --output /dev/null \
-            --write-out '%{http_code}' "$DASHBOARD_URL")
-          if [ "$status" != "401" ]; then
-            echo "::error::Expected unauthenticated HTTP 401, received $status"
-            exit 1
-          fi
+          status="000"
+          for attempt in $(seq 1 12); do
+            status=$(curl --silent --output /dev/null \
+              --connect-timeout 10 --max-time 20 \
+              --write-out '%{http_code}' "$DASHBOARD_URL" || true)
+            if [ "$status" = "401" ]; then
+              exit 0
+            fi
+            echo "Attempt $attempt/12 returned HTTP $status; retrying in 5 seconds..."
+            sleep 5
+          done
+          echo "::error::Expected unauthenticated HTTP 401, received $status"
+          exit 1
 
       - name: Job summary
         if: always()

@@ -14,7 +14,9 @@ The Worker provides:
 ## Runtime configuration
 
 [`wrangler.jsonc`](wrangler.jsonc) is the source of truth for the Worker name,
-production Worker Route, static assets and Cron Trigger.
+Cloudflare-managed production Custom Domain, static assets and Cron Trigger.
+The Custom Domain binding creates and maintains the required DNS record, so the
+dashboard does not depend on a separate CloudPanel-origin DNS entry.
 
 Required encrypted Worker secrets:
 
@@ -42,7 +44,8 @@ npm run deploy:cloudflare
 ```
 
 The deploy command runs the syntax checks, generates `build-info.json`, uploads
-the Worker and static assets, and applies the production route and Cron Trigger.
+the Worker and static assets, and applies the production Custom Domain and Cron
+Trigger.
 
 ## GitHub Actions
 

@@ -7,8 +7,8 @@
   "workers_dev": true,
   "routes": [
     {
-      "pattern": "sarah-time-dashboard.royalcourtbd.com/*",
-      "zone_name": "royalcourtbd.com"
+      "pattern": "sarah-time-dashboard.royalcourtbd.com",
+      "custom_domain": true
     }
   ],
   "define": {
