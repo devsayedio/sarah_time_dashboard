@@ -9,6 +9,7 @@ The Worker provides:
 - static frontend delivery through Workers Assets
 - encrypted Firebase and Basic Auth secrets
 - a five-minute Cron Trigger for scheduled notifications
+- shared dashboard/settings caching through Cloudflare KV
 - the same Firebase project and API response contracts used by the mobile app
 
 ## Runtime configuration
@@ -25,6 +26,12 @@ Required encrypted Worker secrets:
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | Firebase Admin service-account JSON |
 | `BASIC_AUTH_USERNAME` | Dashboard Basic Auth username |
 | `BASIC_AUTH_PASSWORD` | Dashboard Basic Auth password |
+
+Required KV binding:
+
+| Binding | Purpose |
+|---|---|
+| `DASHBOARD_CACHE` | Shared date-based dashboard and office-settings responses |
 
 Set or rotate a secret without putting it in git:
 
@@ -61,6 +68,28 @@ Configure these GitHub Actions values in the `production` environment:
 
 The encrypted runtime secrets are already attached to the Worker and are
 inherited by later deployments; they are not copied into GitHub.
+
+## Dashboard cache
+
+The authenticated Worker checks `DASHBOARD_CACHE` before initializing Firebase:
+
+- today's dashboard: 60 seconds
+- past dates: 24 hours
+- future dates: 15 minutes
+- office settings: 10 minutes
+
+Dashboard responses also use a short, in-memory browser cache (30 seconds for
+today, one hour for past dates and five minutes for future dates). The browser
+keeps at most 31 dates and never persists employee HR details to local storage.
+
+Successful attendance, employee, office-policy and date-override mutations
+invalidate the affected KV entries. `Refresh Data` sends `refresh=1`, bypasses
+KV, reads Firebase and replaces the cached response. Direct writes from the
+Flutter app to Firestore do not pass through this Worker, so today's 60-second
+TTL is the freshness safety net for those writes.
+
+Inspect cache behaviour on an authenticated dashboard response with the
+`X-Dashboard-Cache` header (`MISS`, `HIT` or `BYPASS`).
 
 ## Verification
 
