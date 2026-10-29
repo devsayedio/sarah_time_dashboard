@@ -1597,6 +1597,16 @@ async function scheduledNotificationTick() {
   }
 }
 
+// Keep local Node.js development consistent with the Cloudflare SPA fallback.
+// API routes and real static assets are resolved first; only known dashboard
+// views receive index.html so a direct deep-link or browser refresh still works.
+if (!isCloudflareWorker) {
+  app.get(
+    /^\/(?:overview|attendance|employees(?:\/(?:new|[^/]+))?|notifications|settings)\/?$/,
+    (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html'))
+  );
+}
+
 app.listen(PORT, () => {
   console.log(`Sarah Time Admin Dashboard running on http://localhost:${PORT}`);
   if (!isCloudflareWorker) {

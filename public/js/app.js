@@ -21,6 +21,14 @@ let state = {
 const DASHBOARD_BROWSER_CACHE_LIMIT = 31;
 const dashboardDateCache = new Map();
 const dashboardRequestsInFlight = new Map();
+let routeNavigationSequence = 0;
+const TAB_PATHS = Object.freeze({
+  dashboard: '/overview',
+  attendance: '/attendance',
+  employees: '/employees',
+  notifications: '/notifications',
+  settings: '/settings'
+});
 
 // Helper: Today's Date in Dhaka format (YYYY-MM-DD)
 function getTodayDhakaDate() {
@@ -33,10 +41,17 @@ function getTodayDhakaDate() {
   return formatter.format(new Date());
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   initUI();
   loadBuildInfo();
-  loadDashboardData();
+  const dashboardReady = loadDashboardData();
+  const initialRoute = routeFromPathname(window.location.pathname);
+
+  // A new employee ID is derived from the loaded directory. Waiting only for
+  // this route prevents a direct /employees/new visit from suggesting ST001
+  // before the existing employees are available.
+  if (initialRoute?.newEmployee) await dashboardReady;
+  await navigateFromLocation({ historyMode: 'replace' });
 });
 
 function initUI() {
@@ -85,6 +100,10 @@ function initUI() {
       const tabName = item.getAttribute('data-tab');
       switchTab(tabName);
     });
+  });
+
+  window.addEventListener('popstate', () => {
+    navigateFromLocation({ historyMode: 'none' });
   });
 
   // Search & Filter listeners
@@ -244,11 +263,85 @@ async function copyBuildInfo() {
   }, 1600);
 }
 
-function switchTab(tabName) {
+function routeForTab(tabName) {
+  if (tabName !== 'employee-edit') return TAB_PATHS[tabName] || TAB_PATHS.dashboard;
+
+  if (isNewEmployee) return '/employees/new';
+  const employeeId = document.getElementById('editEmpUid')?.value;
+  return employeeId ? `/employees/${encodeURIComponent(employeeId)}` : TAB_PATHS.employees;
+}
+
+function updateBrowserRoute(tabName, historyMode) {
+  if (historyMode === 'none') return;
+
+  const path = routeForTab(tabName);
+  const currentPath = window.location.pathname.replace(/\/+$/, '') || '/';
+  if (historyMode === 'push' && currentPath === path) return;
+
+  const method = historyMode === 'replace' ? 'replaceState' : 'pushState';
+  window.history[method]({ tab: tabName }, '', path);
+}
+
+function routeFromPathname(pathname) {
+  const normalizedPath = pathname.replace(/\/+$/, '') || '/';
+  if (normalizedPath === '/' || normalizedPath === '/overview') {
+    return { tab: 'dashboard' };
+  }
+
+  const directTab = Object.entries(TAB_PATHS)
+    .find(([, path]) => path === normalizedPath);
+  if (directTab) return { tab: directTab[0] };
+
+  if (normalizedPath === '/employees/new') {
+    return { tab: 'employee-edit', newEmployee: true };
+  }
+
+  const employeeMatch = normalizedPath.match(/^\/employees\/([^/]+)$/);
+  if (employeeMatch) {
+    try {
+      return { tab: 'employee-edit', employeeId: decodeURIComponent(employeeMatch[1]) };
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+async function navigateFromLocation({ historyMode = 'none' } = {}) {
+  const route = routeFromPathname(window.location.pathname);
+  if (!route) {
+    switchTab('dashboard', { historyMode: 'replace' });
+    return;
+  }
+
+  if (route.newEmployee) {
+    openAddEmployee({ historyMode });
+    return;
+  }
+
+  if (route.employeeId) {
+    await viewEmployeeProfile(route.employeeId, { historyMode });
+    return;
+  }
+
+  switchTab(route.tab, { historyMode });
+}
+
+function switchTab(tabName, { historyMode = 'push' } = {}) {
+  const tabElement = document.getElementById(`tab-${tabName}`);
+  if (!tabElement) {
+    console.warn(`Unknown dashboard tab: ${tabName}`);
+    return;
+  }
+
+  routeNavigationSequence += 1;
   state.currentTab = tabName;
+  updateBrowserRoute(tabName, historyMode);
 
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-  document.querySelector(`.nav-item[data-tab="${tabName}"]`)?.classList.add('active');
+  const navTab = tabName === 'employee-edit' ? 'employees' : tabName;
+  document.querySelector(`.nav-item[data-tab="${navTab}"]`)?.classList.add('active');
 
   document.querySelectorAll('.tab-page').forEach(el => el.classList.remove('active'));
   document.getElementById(`tab-${tabName}`)?.classList.add('active');
@@ -257,6 +350,9 @@ function switchTab(tabName) {
     dashboard: { title: 'Dashboard Overview', sub: "Today's live attendance statistics" },
     attendance: { title: 'Attendance Logs', sub: 'Comprehensive record of employee check-ins' },
     employees: { title: 'Employee Directory', sub: 'Manage registered employees and profiles' },
+    'employee-edit': isNewEmployee
+      ? { title: 'Add Employee', sub: 'Create a new employee profile' }
+      : { title: 'Employee Profile', sub: 'View and manage employee details' },
     notifications: { title: 'Push Notifications', sub: 'Send, schedule and review employee notifications' },
     settings: { title: 'Office & Policy Settings', sub: 'Configure geofencing and working hours' }
   };
@@ -264,6 +360,7 @@ function switchTab(tabName) {
   if (titleMap[tabName]) {
     document.getElementById('currentTabTitle').textContent = titleMap[tabName].title;
     document.getElementById('currentTabSub').textContent = titleMap[tabName].sub;
+    document.title = `${titleMap[tabName].title} | Sarah Time`;
   }
 
   if (tabName === 'settings') {
@@ -634,7 +731,7 @@ async function toggleEmployeeActive(empId, isChecked) {
 
 let isNewEmployee = false;
 
-window.openAddEmployee = function() {
+window.openAddEmployee = function({ historyMode = 'push' } = {}) {
   isNewEmployee = true;
   document.getElementById('editEmpHeaderTitle').textContent = 'Add New Employee';
   document.getElementById('editEmpUid').value = '';
@@ -682,10 +779,11 @@ window.openAddEmployee = function() {
   setEmployeeEditMode(true);
   document.getElementById('btnDeleteEmployee').style.display = 'none'; // Hide delete button for new user
   document.getElementById('btnEditEmployeeToggle').style.display = 'none'; // Hide toggle
-  switchTab('employee-edit');
+  switchTab('employee-edit', { historyMode });
 }
 
-window.viewEmployeeProfile = async function(empId) {
+window.viewEmployeeProfile = async function(empId, { historyMode = 'push' } = {}) {
+  const navigationSequence = ++routeNavigationSequence;
   isNewEmployee = false;
   const cachedDetail = state.employeeDetails.get(empId);
   let emp = cachedDetail && cachedDetail.expiresAt > Date.now()
@@ -708,11 +806,18 @@ window.viewEmployeeProfile = async function(empId) {
     } catch (error) {
       console.error('Failed to load employee profile:', error);
       alert('Could not load the employee profile. Please try again.');
+      if (historyMode !== 'push') {
+        switchTab('employees', { historyMode: 'replace' });
+      }
       return;
     } finally {
       hideLoader();
     }
   }
+
+  // Ignore an old profile response if the user already navigated elsewhere
+  // while the request was in flight.
+  if (navigationSequence !== routeNavigationSequence) return;
 
   const p = emp.profile || {};
   document.getElementById('editEmpHeaderTitle').textContent = `Profile: ${p.employeeName || emp.authEmail || 'Employee'}`;
@@ -751,7 +856,7 @@ window.viewEmployeeProfile = async function(empId) {
   document.getElementById('btnEditEmployeeToggle').style.display = 'inline-block';
 
   setEmployeeEditMode(false);
-  switchTab('employee-edit');
+  switchTab('employee-edit', { historyMode });
   
   // Load Attendance
   document.getElementById('empAttendanceSection').style.display = 'block';
@@ -845,7 +950,7 @@ async function handleEmployeeUpdate(e) {
       invalidateDashboardBrowserCache();
       state.employeeDetails.clear();
       await loadDashboardData({ force: true });
-      switchTab('employees');
+      switchTab('employees', { historyMode: 'replace' });
     } else {
       alert('Failed to save: ' + data.error);
     }
@@ -877,7 +982,7 @@ async function handleEmployeeDelete() {
       invalidateDashboardBrowserCache();
       state.employeeDetails.delete(empId);
       await loadDashboardData({ force: true });
-      switchTab('employees');
+      switchTab('employees', { historyMode: 'replace' });
     } else {
       alert('Failed to delete: ' + data.error);
     }
