@@ -114,6 +114,17 @@ const PROFILE_STRING_FIELDS = [
   'salary'
 ];
 
+// The overview, attendance table, employee directory and notification picker
+// only need these non-sensitive profile fields. Full HR/profile data is loaded
+// from the employee-detail endpoint only when an admin opens a profile.
+const DASHBOARD_PROFILE_FIELDS = [
+  'employeeName',
+  'employeeId',
+  'designation',
+  'department',
+  'officialEmail'
+];
+
 // Bundled asset path in the Flutter app (SvgPath.icDemoUser).
 const DEFAULT_PROFILE_IMAGE_PATH = 'assets/png/ic_demo_user.png';
 
@@ -268,6 +279,14 @@ function employeeProfile(employeeData) {
   return profile;
 }
 
+function dashboardEmployeeProfile(employeeData) {
+  const profile = {};
+  for (const field of DASHBOARD_PROFILE_FIELDS) {
+    profile[field] = toProfileString(employeeData[field]);
+  }
+  return profile;
+}
+
 function attendanceForDashboard(data) {
   if (!data) return null;
   return {
@@ -360,7 +379,7 @@ async function loadDailyDashboard(dateKey) {
       authEmail: employeeData.authEmail || employeeData.personalEmail || 'N/A',
       isActive,
       hasFcmToken: Boolean(employeeData.fcmToken),
-      profile: employeeProfile(employeeData),
+      profile: dashboardEmployeeProfile(employeeData),
       todayAttendance
     });
 
@@ -448,6 +467,33 @@ app.get('/api/employees', async (req, res) => {
     res.json({ success: true, dateKey, employees });
   } catch (error) {
     console.error('Error fetching employees:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// API 2.1: Employee detail. Sensitive profile fields are intentionally kept
+// out of the cached dashboard payload and fetched only for this explicit view.
+app.get('/api/employees/:id', async (req, res) => {
+  try {
+    const employeeSnap = await db.collection(EMPLOYEES).doc(req.params.id).get();
+    if (!employeeSnap.exists) {
+      return res.status(404).json({ success: false, error: 'Employee not found.' });
+    }
+
+    const employeeData = employeeSnap.data();
+    res.set('Cache-Control', 'private, no-store');
+    res.json({
+      success: true,
+      employee: {
+        id: employeeSnap.id,
+        authEmail: employeeData.authEmail || employeeData.personalEmail || 'N/A',
+        isActive: employeeData.isActive !== false,
+        hasFcmToken: Boolean(employeeData.fcmToken),
+        profile: employeeProfile(employeeData)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching employee detail:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });

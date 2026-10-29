@@ -19,6 +19,12 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
+  "kv_namespaces": [
+    {
+      "binding": "DASHBOARD_CACHE",
+      "id": "8a18de16b5c846dabf940f31ace06948"
+    }
+  ],
   "triggers": {
     "crons": ["*/5 * * * *"]
   },

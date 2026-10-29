@@ -8,6 +8,10 @@ const serverModule = await import('./server.js');
 const serverExports = serverModule.default || serverModule;
 const expressHandler = httpServerHandler({ port: 3000 });
 
+const DASHBOARD_CACHE_PREFIX = 'dashboard:v2:';
+const SETTINGS_CACHE_KEY = 'settings:v1:office';
+const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
 function unauthorized() {
   return new Response('Authentication required', {
     status: 401,
@@ -49,14 +53,209 @@ function isBackendRoute(pathname) {
     pathname === '/version';
 }
 
+function getDhakaDateKey() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Dhaka',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date());
+}
+
+function dashboardCacheTtl(dateKey) {
+  const today = getDhakaDateKey();
+  if (dateKey === today) return 60;
+  return dateKey < today ? 86400 : 900;
+}
+
+function dashboardCacheKey(dateKey) {
+  return `${DASHBOARD_CACHE_PREFIX}${dateKey}`;
+}
+
+function cacheResponse(body, cacheStatus, ttlSeconds) {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      'Cache-Control': 'private, no-store',
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-Dashboard-Cache': cacheStatus,
+      'X-Dashboard-Cache-Ttl': String(ttlSeconds)
+    }
+  });
+}
+
+function addCacheHeaders(response, cacheStatus, ttlSeconds) {
+  const headers = new Headers(response.headers);
+  headers.set('Cache-Control', 'private, no-store');
+  headers.set('X-Dashboard-Cache', cacheStatus);
+  headers.set('X-Dashboard-Cache-Ttl', String(ttlSeconds));
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+async function readKv(bindings, key) {
+  if (!bindings.DASHBOARD_CACHE) return null;
+  try {
+    return await bindings.DASHBOARD_CACHE.get(key);
+  } catch (error) {
+    console.warn(`Dashboard cache read failed for ${key}:`, error);
+    return null;
+  }
+}
+
+function storeKv(bindings, context, key, body, expirationTtl) {
+  if (!bindings.DASHBOARD_CACHE) return;
+  context.waitUntil(
+    bindings.DASHBOARD_CACHE
+      .put(key, body, { expirationTtl })
+      .catch(error => console.warn(`Dashboard cache write failed for ${key}:`, error))
+  );
+}
+
+async function handleJsonCache(request, bindings, context, key, ttlSeconds) {
+  const url = new URL(request.url);
+  const bypass = url.searchParams.get('refresh') === '1';
+
+  if (!bypass) {
+    const cached = await readKv(bindings, key);
+    if (cached !== null) return cacheResponse(cached, 'HIT', ttlSeconds);
+  }
+
+  serverExports.ensureFirebaseInitialized();
+  const response = await expressHandler.fetch(request, bindings, context);
+  if (response.ok) {
+    const body = await response.clone().text();
+    storeKv(bindings, context, key, body, ttlSeconds);
+  }
+
+  return addCacheHeaders(response, bypass ? 'BYPASS' : 'MISS', ttlSeconds);
+}
+
+async function handleDashboardRequest(request, bindings, context) {
+  const url = new URL(request.url);
+  const dateKey = url.searchParams.get('date') || getDhakaDateKey();
+  if (!DATE_KEY_PATTERN.test(dateKey)) {
+    serverExports.ensureFirebaseInitialized();
+    return expressHandler.fetch(request, bindings, context);
+  }
+
+  const ttlSeconds = dashboardCacheTtl(dateKey);
+  return handleJsonCache(
+    request,
+    bindings,
+    context,
+    dashboardCacheKey(dateKey),
+    ttlSeconds
+  );
+}
+
+async function requestJson(request) {
+  try {
+    return await request.clone().json();
+  } catch {
+    return {};
+  }
+}
+
+async function cacheInvalidationFor(request, pathname) {
+  const method = request.method.toUpperCase();
+
+  if (pathname === '/api/attendance/edit' && method === 'PUT') {
+    return { dates: [(await requestJson(request)).dateKey].filter(Boolean) };
+  }
+  if (pathname === '/api/attendance/delete' && method === 'DELETE') {
+    return { dates: [(await requestJson(request)).dateKey].filter(Boolean) };
+  }
+  if (pathname === '/api/settings/date-override' && method === 'POST') {
+    return {
+      dates: [(await requestJson(request)).dateKey].filter(Boolean),
+      settings: true
+    };
+  }
+  if (pathname.startsWith('/api/settings/date-override/') && method === 'DELETE') {
+    return {
+      dates: [decodeURIComponent(pathname.slice('/api/settings/date-override/'.length))],
+      settings: true
+    };
+  }
+  if (pathname === '/api/settings/office' && method === 'POST') {
+    return { allDates: true, settings: true };
+  }
+  if (pathname === '/api/employees' && method === 'POST') {
+    return { allDates: true };
+  }
+  if (pathname.startsWith('/api/employees/') && ['POST', 'PUT', 'DELETE'].includes(method)) {
+    return { allDates: true };
+  }
+
+  return null;
+}
+
+async function deleteKvKeys(bindings, keys) {
+  if (!bindings.DASHBOARD_CACHE || keys.length === 0) return;
+  for (let offset = 0; offset < keys.length; offset += 20) {
+    await Promise.all(
+      keys.slice(offset, offset + 20).map(key => bindings.DASHBOARD_CACHE.delete(key))
+    );
+  }
+}
+
+async function invalidateAllDashboardDates(bindings) {
+  if (!bindings.DASHBOARD_CACHE) return;
+  let cursor;
+  do {
+    const page = await bindings.DASHBOARD_CACHE.list({
+      prefix: DASHBOARD_CACHE_PREFIX,
+      ...(cursor ? { cursor } : {})
+    });
+    await deleteKvKeys(bindings, page.keys.map(key => key.name));
+    if (page.list_complete) break;
+    cursor = page.cursor;
+  } while (cursor);
+}
+
+async function applyCacheInvalidation(bindings, invalidation) {
+  if (!bindings.DASHBOARD_CACHE || !invalidation) return;
+  try {
+    if (invalidation.allDates) {
+      await invalidateAllDashboardDates(bindings);
+    } else {
+      await deleteKvKeys(
+        bindings,
+        (invalidation.dates || [])
+          .filter(dateKey => DATE_KEY_PATTERN.test(dateKey))
+          .map(dashboardCacheKey)
+      );
+    }
+    if (invalidation.settings) {
+      await bindings.DASHBOARD_CACHE.delete(SETTINGS_CACHE_KEY);
+    }
+  } catch (error) {
+    console.warn('Dashboard cache invalidation failed:', error);
+  }
+}
+
 export default {
   async fetch(request, bindings, context) {
     if (!isAuthorized(request, bindings)) return unauthorized();
 
     const { pathname } = new URL(request.url);
     if (isBackendRoute(pathname)) {
+      if (request.method === 'GET' && pathname === '/api/dashboard') {
+        return handleDashboardRequest(request, bindings, context);
+      }
+      if (request.method === 'GET' && pathname === '/api/settings/office') {
+        return handleJsonCache(request, bindings, context, SETTINGS_CACHE_KEY, 600);
+      }
+
+      const invalidation = await cacheInvalidationFor(request, pathname);
       serverExports.ensureFirebaseInitialized();
-      return expressHandler.fetch(request, bindings, context);
+      const response = await expressHandler.fetch(request, bindings, context);
+      if (response.ok) await applyCacheInvalidation(bindings, invalidation);
+      return response;
     }
 
     return bindings.ASSETS.fetch(request);

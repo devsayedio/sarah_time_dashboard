@@ -5,16 +5,22 @@ let state = {
   selectedDate: getTodayDhakaDate(),
   stats: null,
   employees: [],
+  employeeDetails: new Map(),
   attendanceLogs: [],
   officeSettings: null,
   dateOverrides: [],
   dashboardDate: null,
   settingsLoaded: false,
+  settingsLoadedAt: 0,
   buildInfo: null,
   map: null,
   mapMarker: null,
   mapCircle: null
 };
+
+const DASHBOARD_BROWSER_CACHE_LIMIT = 31;
+const dashboardDateCache = new Map();
+const dashboardRequestsInFlight = new Map();
 
 // Helper: Today's Date in Dhaka format (YYYY-MM-DD)
 function getTodayDhakaDate() {
@@ -261,11 +267,8 @@ function switchTab(tabName) {
   }
 
   if (tabName === 'settings') {
-    if (!state.settingsLoaded) {
-      fetchSettings();
-    } else {
-      setTimeout(initOrUpdateMap, 200);
-    }
+    fetchSettings();
+    if (state.settingsLoaded) setTimeout(initOrUpdateMap, 200);
   }
 
   if (tabName === 'notifications') {
@@ -299,29 +302,87 @@ function setBtnLoading(btnId, isLoading) {
   }
 }
 
+function dashboardBrowserCacheTtl(dateKey) {
+  const today = getTodayDhakaDate();
+  if (dateKey === today) return 30 * 1000;
+  return dateKey < today ? 60 * 60 * 1000 : 5 * 60 * 1000;
+}
+
+function rememberDashboardData(data) {
+  dashboardDateCache.delete(data.dateKey);
+  dashboardDateCache.set(data.dateKey, {
+    data,
+    expiresAt: Date.now() + dashboardBrowserCacheTtl(data.dateKey)
+  });
+
+  while (dashboardDateCache.size > DASHBOARD_BROWSER_CACHE_LIMIT) {
+    dashboardDateCache.delete(dashboardDateCache.keys().next().value);
+  }
+}
+
+function invalidateDashboardBrowserCache(dateKey = null) {
+  if (dateKey) dashboardDateCache.delete(dateKey);
+  else dashboardDateCache.clear();
+  state.dashboardDate = null;
+}
+
+function applyDashboardData(data) {
+  state.stats = data.stats;
+  state.employees = data.employees;
+  state.attendanceLogs = data.logs;
+  state.officeSettings = data.officeSettings;
+  state.dashboardDate = data.dateKey;
+  renderStatsCards();
+  renderDashSummary();
+  renderEmployeeDirectory();
+  renderAttendanceLogs();
+  renderNotifRecipientSummary();
+}
+
 async function loadDashboardData({ force = false } = {}) {
-  if (!force && state.dashboardDate === state.selectedDate) return;
+  const requestedDate = state.selectedDate;
+  const cached = dashboardDateCache.get(requestedDate);
+
+  if (!force && cached && cached.expiresAt > Date.now()) {
+    applyDashboardData(cached.data);
+    return;
+  }
+
+  let requestPromise = !force ? dashboardRequestsInFlight.get(requestedDate) : null;
   showLoader();
   try {
-    const res = await fetch(`/api/dashboard?date=${state.selectedDate}`);
-    const data = await res.json();
-    if (data.success) {
-      state.stats = data.stats;
-      state.employees = data.employees;
-      state.attendanceLogs = data.logs;
-      state.officeSettings = data.officeSettings;
-      state.dashboardDate = data.dateKey;
-      renderStatsCards();
-      renderDashSummary();
-      renderEmployeeDirectory();
-      renderAttendanceLogs();
-      renderNotifRecipientSummary();
-    } else {
-      console.error('Dashboard request failed:', data.error);
+    if (!requestPromise) {
+      const params = new URLSearchParams({ date: requestedDate });
+      if (force) params.set('refresh', '1');
+
+      requestPromise = (async () => {
+        const res = await fetch(`/api/dashboard?${params}`, {
+          cache: force ? 'no-store' : 'default'
+        });
+        if (!res.ok) throw new Error(`Dashboard request failed with HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Dashboard request failed');
+        rememberDashboardData(data);
+        return data;
+      })();
+
+      if (!force) dashboardRequestsInFlight.set(requestedDate, requestPromise);
     }
+
+    const data = await requestPromise;
+    if (state.selectedDate === data.dateKey) applyDashboardData(data);
   } catch (err) {
     console.error('Error fetching dashboard:', err);
+    // An expired in-memory response is safer than an empty dashboard when the
+    // network is temporarily unavailable. Manual Refresh still reports/fetches
+    // the live response and never relies on this fallback.
+    if (!force && cached?.data && state.selectedDate === cached.data.dateKey) {
+      applyDashboardData(cached.data);
+    }
   } finally {
+    if (!force && dashboardRequestsInFlight.get(requestedDate) === requestPromise) {
+      dashboardRequestsInFlight.delete(requestedDate);
+    }
     hideLoader();
   }
 }
@@ -382,15 +443,20 @@ function renderStatsCards() {
 }
 
 async function fetchSettings({ force = false } = {}) {
-  if (!force && state.settingsLoaded) return;
+  const settingsAreFresh = state.settingsLoaded &&
+    (Date.now() - state.settingsLoadedAt) < 5 * 60 * 1000;
+  if (!force && settingsAreFresh) return;
   showLoader();
   try {
-    const res = await fetch('/api/settings/office');
+    const res = await fetch(force ? '/api/settings/office?refresh=1' : '/api/settings/office', {
+      cache: force ? 'no-store' : 'default'
+    });
     const data = await res.json();
     if (data.success) {
       state.officeSettings = data.settings;
       state.dateOverrides = data.dateOverrides;
       state.settingsLoaded = true;
+      state.settingsLoadedAt = Date.now();
       populateSettingsForm();
       renderDateOverrides();
       initOrUpdateMap();
@@ -557,6 +623,8 @@ async function toggleEmployeeActive(empId, isChecked) {
     });
     const data = await res.json();
     if (data.success) {
+      invalidateDashboardBrowserCache();
+      state.employeeDetails.delete(empId);
       await loadDashboardData({ force: true });
     }
   } catch (err) {
@@ -617,10 +685,34 @@ window.openAddEmployee = function() {
   switchTab('employee-edit');
 }
 
-window.viewEmployeeProfile = function(empId) {
+window.viewEmployeeProfile = async function(empId) {
   isNewEmployee = false;
-  const emp = state.employees.find(e => e.id === empId);
-  if (!emp) return;
+  const cachedDetail = state.employeeDetails.get(empId);
+  let emp = cachedDetail && cachedDetail.expiresAt > Date.now()
+    ? cachedDetail.employee
+    : null;
+
+  if (!emp) {
+    showLoader();
+    try {
+      const response = await fetch(`/api/employees/${empId}`, { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `Employee request failed with HTTP ${response.status}`);
+      }
+      emp = data.employee;
+      state.employeeDetails.set(empId, {
+        employee: emp,
+        expiresAt: Date.now() + 5 * 60 * 1000
+      });
+    } catch (error) {
+      console.error('Failed to load employee profile:', error);
+      alert('Could not load the employee profile. Please try again.');
+      return;
+    } finally {
+      hideLoader();
+    }
+  }
 
   const p = emp.profile || {};
   document.getElementById('editEmpHeaderTitle').textContent = `Profile: ${p.employeeName || emp.authEmail || 'Employee'}`;
@@ -750,6 +842,8 @@ async function handleEmployeeUpdate(e) {
     const data = await res.json();
     if (data.success) {
       alert(isNewEmployee ? 'Employee added successfully with default password "123456"' : 'Employee details updated successfully.');
+      invalidateDashboardBrowserCache();
+      state.employeeDetails.clear();
       await loadDashboardData({ force: true });
       switchTab('employees');
     } else {
@@ -780,6 +874,8 @@ async function handleEmployeeDelete() {
     const data = await res.json();
     if (data.success) {
       alert('Employee deleted successfully.');
+      invalidateDashboardBrowserCache();
+      state.employeeDetails.delete(empId);
       await loadDashboardData({ force: true });
       switchTab('employees');
     } else {
@@ -857,7 +953,7 @@ async function handlePolicySubmit(e) {
     const data = await res.json();
     if (data.success) {
       alert('Office policy updated successfully!');
-      state.dashboardDate = null;
+      invalidateDashboardBrowserCache();
       fetchSettings({ force: true });
     }
   } catch (err) {
@@ -882,7 +978,7 @@ async function handleOverrideSubmit(e) {
     const data = await res.json();
     if (data.success) {
       document.getElementById('dateOverrideForm').reset();
-      state.dashboardDate = null;
+      invalidateDashboardBrowserCache(payload.dateKey);
       fetchSettings({ force: true });
     }
   } catch (err) {
@@ -906,7 +1002,7 @@ async function deleteDateOverride(dateKey) {
     });
     const data = await res.json();
     if (data.success) {
-      state.dashboardDate = null;
+      invalidateDashboardBrowserCache(dateKey);
       fetchSettings({ force: true });
     }
   } catch (err) {
@@ -1022,6 +1118,7 @@ async function handleAttendanceEditSubmit(e) {
     const data = await res.json();
     if (data.success) {
       closeEditAttendanceModal();
+      invalidateDashboardBrowserCache(dateKey);
       loadDashboardData({ force: true });
     } else {
       alert('Failed to edit attendance: ' + data.error);
@@ -1060,6 +1157,7 @@ window.handleDeleteAttendance = async function() {
     const data = await res.json();
     if (data.success) {
       closeEditAttendanceModal();
+      invalidateDashboardBrowserCache(dateKey);
       loadDashboardData({ force: true });
     } else {
       alert('Failed to delete: ' + data.error);
