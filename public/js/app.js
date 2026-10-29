@@ -1398,16 +1398,6 @@ async function loadEmployeeAttendance(empId, month) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // PUSH NOTIFICATIONS
-//
-// Ported from the Text Bee dashboard's notification module
-// (lib/presentation/pages/notification_management_page.dart +
-// lib/data/services/notification_service.dart). Same three tabs, the same
-// target / status / recurring vocabulary and the same API contract.
-//
-// Recipient search runs against `state.employees`, which the dashboard has
-// already loaded, instead of Text Bee's server-side user search endpoint —
-// this project has one employee directory in memory, so a second endpoint
-// would only duplicate it.
 // ═══════════════════════════════════════════════════════════════════════
 
 const NOTIF_HISTORY_PAGE_SIZE = 20;
@@ -1415,10 +1405,17 @@ const NOTIF_HISTORY_PAGE_SIZE = 20;
 const notifState = {
   historyLogs: [],
   historyPage: 1,
-  historyTotalCount: 0,
+  historyCursor: null,
+  historyCursorStack: [],
+  historyNextCursor: null,
   historyHasMore: false,
   historySelection: new Set(),
   scheduled: [],
+  scheduledPage: 1,
+  scheduledCursor: null,
+  scheduledCursorStack: [],
+  scheduledNextCursor: null,
+  scheduledHasMore: false,
   scheduledSelection: new Set(),
   detailLogId: null,
   searchDebounce: null,
@@ -1428,11 +1425,25 @@ const notifState = {
 // ─── Formatting helpers (mirror NotificationLogModel getters) ─────────
 
 function notifTargetLabel(target) {
-  return target === 'all_users' ? 'All Employees' : 'Selected Employees';
+  const labels = {
+    all_users: 'All Employees',
+    selected_users: 'Selected Employees',
+    office_broadcast: 'Office Broadcast',
+    office_check_in_reminder: 'Check-in Reminder',
+    office_check_out_reminder: 'Check-out Reminder'
+  };
+  return labels[target] || target;
 }
 
 function notifStatusLabel(status) {
-  const labels = { success: 'Sent', failed: 'Failed', pending: 'Scheduled', sent: 'Sent', cancelled: 'Cancelled' };
+  const labels = {
+    success: 'Sent',
+    failed: 'Failed',
+    pending: 'Scheduled',
+    processing: 'Sending',
+    sent: 'Sent',
+    cancelled: 'Cancelled'
+  };
   return labels[status] || status;
 }
 
@@ -1443,6 +1454,9 @@ function notifRecurringLabel(item) {
 }
 
 function notifDeliverySummary(log) {
+  if (log.skippedReason === 'office_closed') return 'Office closed';
+  if (log.skippedReason === 'attendance_already_complete') return 'No reminder needed';
+  if (log.deliveryMode === 'topic') return 'Topic accepted';
   const total = (log.successCount || 0) + (log.failureCount || 0);
   if (total === 0) return '-';
   if (!log.failureCount) return `${log.successCount} sent`;
@@ -1674,14 +1688,12 @@ function initNotifications() {
   document.getElementById('notifHistorySearch').addEventListener('input', () => {
     clearTimeout(notifState.searchDebounce);
     notifState.searchDebounce = setTimeout(() => {
-      notifState.historyPage = 1;
-      fetchNotificationHistory();
+      resetNotificationHistoryPagination();
     }, 400);
   });
   ['notifHistoryTarget', 'notifHistoryStatus', 'notifHistoryFrom', 'notifHistoryTo'].forEach(id => {
     document.getElementById(id).addEventListener('change', () => {
-      notifState.historyPage = 1;
-      fetchNotificationHistory();
+      resetNotificationHistoryPagination();
     });
   });
   document.getElementById('notifHistoryReset').addEventListener('click', () => {
@@ -1690,20 +1702,34 @@ function initNotifications() {
     document.getElementById('notifHistoryStatus').value = '';
     document.getElementById('notifHistoryFrom').value = '';
     document.getElementById('notifHistoryTo').value = '';
-    notifState.historyPage = 1;
-    fetchNotificationHistory();
+    resetNotificationHistoryPagination();
   });
   document.getElementById('notifHistoryPrev').addEventListener('click', () => {
-    if (notifState.historyPage > 1) {
-      notifState.historyPage--;
-      fetchNotificationHistory();
-    }
+    if (notifState.historyCursorStack.length === 0) return;
+    notifState.historyCursor = notifState.historyCursorStack.pop() || null;
+    notifState.historyPage = Math.max(1, notifState.historyPage - 1);
+    fetchNotificationHistory();
   });
   document.getElementById('notifHistoryNext').addEventListener('click', () => {
-    if (notifState.historyHasMore) {
-      notifState.historyPage++;
-      fetchNotificationHistory();
-    }
+    if (!notifState.historyNextCursor) return;
+    notifState.historyCursorStack.push(notifState.historyCursor);
+    notifState.historyCursor = notifState.historyNextCursor;
+    notifState.historyPage++;
+    fetchNotificationHistory();
+  });
+
+  document.getElementById('notifScheduledPrev').addEventListener('click', () => {
+    if (notifState.scheduledCursorStack.length === 0) return;
+    notifState.scheduledCursor = notifState.scheduledCursorStack.pop() || null;
+    notifState.scheduledPage = Math.max(1, notifState.scheduledPage - 1);
+    fetchScheduledNotifications();
+  });
+  document.getElementById('notifScheduledNext').addEventListener('click', () => {
+    if (!notifState.scheduledNextCursor) return;
+    notifState.scheduledCursorStack.push(notifState.scheduledCursor);
+    notifState.scheduledCursor = notifState.scheduledNextCursor;
+    notifState.scheduledPage++;
+    fetchScheduledNotifications();
   });
 
   // History selection + delete
@@ -1821,9 +1847,15 @@ async function handleSendNotification(event) {
     return;
   }
 
-  const audience = payload.target === 'all_users'
-    ? 'all active employees'
-    : `${payload.recipientUids.length} selected employee(s)`;
+  const audience = payload.target === 'selected_users'
+    ? `${payload.recipientUids.length} selected employee(s)`
+    : payload.target === 'office_broadcast'
+      ? 'the office broadcast topic'
+      : payload.target === 'office_check_in_reminder'
+        ? 'employees who have not checked in'
+        : payload.target === 'office_check_out_reminder'
+          ? 'employees waiting to check out'
+          : 'all active employees';
   if (!confirm(`Send this notification to ${audience}?`)) return;
 
   setBtnLoading('btnSendNotification', true);
@@ -1853,15 +1885,21 @@ async function handleSendNotification(event) {
 
 // ─── History tab ──────────────────────────────────────────────────────
 
+function resetNotificationHistoryPagination() {
+  notifState.historyPage = 1;
+  notifState.historyCursor = null;
+  notifState.historyCursorStack = [];
+  notifState.historyNextCursor = null;
+  fetchNotificationHistory();
+}
+
 async function fetchNotificationHistory() {
   const tbody = document.getElementById('notifHistoryTable');
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;">Loading...</td></tr>`;
 
-  const params = new URLSearchParams({
-    page: String(notifState.historyPage),
-    limit: String(NOTIF_HISTORY_PAGE_SIZE)
-  });
+  const params = new URLSearchParams({ limit: String(NOTIF_HISTORY_PAGE_SIZE) });
+  if (notifState.historyCursor) params.set('cursor', notifState.historyCursor);
   const search = document.getElementById('notifHistorySearch').value.trim();
   const target = document.getElementById('notifHistoryTarget').value;
   const status = document.getElementById('notifHistoryStatus').value;
@@ -1884,7 +1922,7 @@ async function fetchNotificationHistory() {
     }
 
     notifState.historyLogs = data.data.logs;
-    notifState.historyTotalCount = data.data.totalCount;
+    notifState.historyNextCursor = data.data.nextCursor || null;
     notifState.historyHasMore = data.data.hasMore;
     // Drop selections that are no longer on screen.
     notifState.historySelection = new Set(
@@ -1956,18 +1994,20 @@ function renderNotifHistorySelectionBar() {
 
 function renderNotifHistoryPagination() {
   const bar = document.getElementById('notifHistoryPagination');
-  const total = notifState.historyTotalCount;
-
-  if (total === 0) {
+  if (
+    notifState.historyLogs.length === 0 &&
+    notifState.historyPage === 1 &&
+    !notifState.historyHasMore
+  ) {
     bar.style.display = 'none';
     return;
   }
 
-  const start = (notifState.historyPage - 1) * NOTIF_HISTORY_PAGE_SIZE + 1;
-  const end = Math.min(start + notifState.historyLogs.length - 1, total);
   bar.style.display = 'flex';
-  document.getElementById('notifHistoryRange').textContent = `Showing ${start}-${end} of ${total}`;
-  document.getElementById('notifHistoryPrev').disabled = notifState.historyPage <= 1;
+  document.getElementById('notifHistoryRange').textContent = notifState.historyLogs.length > 0
+    ? `Page ${notifState.historyPage} • ${notifState.historyLogs.length} record(s)`
+    : 'No matching records on this page';
+  document.getElementById('notifHistoryPrev').disabled = notifState.historyCursorStack.length === 0;
   document.getElementById('notifHistoryNext').disabled = !notifState.historyHasMore;
 }
 
@@ -2013,9 +2053,8 @@ window.closeNotifDetailModal = function() {
   modal.style.display = 'none';
 };
 
-// Pre-fills the send form from a past notification, like Text Bee's
-// "Duplicate" action. Recipients are not restored — an old UID may no longer
-// belong to an active employee, so they must be picked again.
+// Recipients are intentionally not restored because an old UID may no longer
+// belong to an active employee.
 function duplicateNotificationToSend() {
   const log = notifState.historyLogs.find(item => item.id === notifState.detailLogId);
   if (!log) return;
@@ -2025,7 +2064,13 @@ function duplicateNotificationToSend() {
   document.getElementById('notifImageUrl').value = log.imageUrl || '';
   document.getElementById('notifActionUrl').value = log.actionUrl || '';
 
-  const target = log.target === 'all_users' ? 'all_users' : 'selected_users';
+  const target = [
+    'all_users',
+    'selected_users',
+    'office_broadcast',
+    'office_check_in_reminder',
+    'office_check_out_reminder'
+  ].includes(log.target) ? log.target : 'all_users';
   const group = document.getElementById('notifTargetGroup');
   group.querySelectorAll('.segment').forEach(segment => {
     segment.classList.toggle('active', segment.getAttribute('data-target') === target);
@@ -2057,10 +2102,10 @@ async function deleteNotifications(ids, collection) {
 
     if (collection === 'notification_logs') {
       notifState.historySelection = new Set();
-      fetchNotificationHistory();
+      resetNotificationHistoryPagination();
     } else {
       notifState.scheduledSelection = new Set();
-      fetchScheduledNotifications();
+      resetScheduledNotificationPagination();
     }
   } catch (err) {
     console.error('Error deleting notifications:', err);
@@ -2070,13 +2115,23 @@ async function deleteNotifications(ids, collection) {
 
 // ─── Scheduled tab ────────────────────────────────────────────────────
 
+function resetScheduledNotificationPagination() {
+  notifState.scheduledPage = 1;
+  notifState.scheduledCursor = null;
+  notifState.scheduledCursorStack = [];
+  notifState.scheduledNextCursor = null;
+  fetchScheduledNotifications();
+}
+
 async function fetchScheduledNotifications() {
   const tbody = document.getElementById('notifScheduledTable');
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;">Loading...</td></tr>`;
 
   try {
-    const res = await fetch('/api/notifications/scheduled');
+    const params = new URLSearchParams({ limit: '25' });
+    if (notifState.scheduledCursor) params.set('cursor', notifState.scheduledCursor);
+    const res = await fetch(`/api/notifications/scheduled?${params.toString()}`);
     const data = await res.json();
 
     if (!data.success) {
@@ -2084,7 +2139,9 @@ async function fetchScheduledNotifications() {
       return;
     }
 
-    notifState.scheduled = data.data;
+    notifState.scheduled = data.data.notifications;
+    notifState.scheduledNextCursor = data.data.nextCursor || null;
+    notifState.scheduledHasMore = data.data.hasMore;
     notifState.scheduledSelection = new Set(
       [...notifState.scheduledSelection].filter(id => notifState.scheduled.some(item => item.id === id))
     );
@@ -2093,6 +2150,8 @@ async function fetchScheduledNotifications() {
     console.error('Error fetching scheduled notifications:', err);
     tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:var(--danger);">Could not connect to server.</td></tr>`;
   }
+
+  renderNotifScheduledPagination();
 }
 
 function renderScheduledNotifications() {
@@ -2143,6 +2202,20 @@ function renderScheduledNotifications() {
   }
 
   renderNotifScheduledSelectionBar();
+}
+
+function renderNotifScheduledPagination() {
+  const bar = document.getElementById('notifScheduledPagination');
+  if (notifState.scheduled.length === 0 && notifState.scheduledPage === 1) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  document.getElementById('notifScheduledRange').textContent =
+    `Page ${notifState.scheduledPage} • ${notifState.scheduled.length} active schedule(s)`;
+  document.getElementById('notifScheduledPrev').disabled =
+    notifState.scheduledCursorStack.length === 0;
+  document.getElementById('notifScheduledNext').disabled = !notifState.scheduledHasMore;
 }
 
 function renderNotifScheduledSelectionBar() {
@@ -2223,7 +2296,7 @@ async function handleScheduleNotification(event) {
 
     if (data.success) {
       closeScheduleNotifModal();
-      fetchScheduledNotifications();
+      resetScheduledNotificationPagination();
     } else {
       alert(data.message || 'Failed to schedule notification.');
     }
@@ -2245,7 +2318,7 @@ window.cancelScheduledNotification = async function(notificationId) {
       body: JSON.stringify({ notificationId })
     });
     const data = await res.json();
-    if (data.success) fetchScheduledNotifications();
+    if (data.success) resetScheduledNotificationPagination();
     else alert(data.message || 'Failed to cancel notification.');
   } catch (err) {
     console.error('Error cancelling scheduled notification:', err);
@@ -2263,7 +2336,7 @@ async function runDueScheduledNotifications() {
     const res = await fetch('/api/notifications/run-scheduled', { method: 'POST' });
     const data = await res.json();
     alert(data.message || 'Done.');
-    fetchScheduledNotifications();
+    resetScheduledNotificationPagination();
     fetchNotificationHistory();
   } catch (err) {
     console.error('Error running scheduled notifications:', err);

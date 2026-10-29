@@ -314,10 +314,14 @@
 
               <div>
                 <h4 class="section-title">Target</h4>
-                <div class="segmented" id="notifTargetGroup">
+                <div class="segmented notification-targets" id="notifTargetGroup">
                   <button type="button" class="segment active" data-target="all_users">All Employees</button>
                   <button type="button" class="segment" data-target="selected_users">Selected Employees</button>
+                  <button type="button" class="segment" data-target="office_broadcast">Office Broadcast</button>
+                  <button type="button" class="segment" data-target="office_check_in_reminder">Check-in Reminder</button>
+                  <button type="button" class="segment" data-target="office_check_out_reminder">Check-out Reminder</button>
                 </div>
+                <p class="muted-note" style="margin-top:10px;">Office Broadcast uses the shared topic for non-sensitive messages. Attendance reminders automatically exclude employees who already completed the relevant action.</p>
 
                 <div class="recipient-picker" id="notifRecipientPicker" style="display:none;">
                   <div class="picker-head">
@@ -359,6 +363,9 @@
                 <option value="">All Targets</option>
                 <option value="all_users">All Employees</option>
                 <option value="selected_users">Selected Employees</option>
+                <option value="office_broadcast">Office Broadcast</option>
+                <option value="office_check_in_reminder">Check-in Reminder</option>
+                <option value="office_check_out_reminder">Check-out Reminder</option>
               </select>
               <select id="notifHistoryStatus" class="select-input">
                 <option value="">All Status</option>
@@ -445,6 +452,14 @@
                 <!-- Dynamically populated -->
               </tbody>
             </table>
+          </div>
+
+          <div class="pagination-bar" id="notifScheduledPagination" style="display:none;">
+            <span id="notifScheduledRange"></span>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button type="button" class="btn-secondary" id="notifScheduledPrev">Previous</button>
+              <button type="button" class="btn-secondary" id="notifScheduledNext">Next</button>
+            </div>
           </div>
         </div>
       </div>
@@ -781,10 +796,14 @@
       <form id="scheduleNotifForm">
         <div class="form-group">
           <label>Target</label>
-          <div class="segmented" id="scheduleTargetGroup">
+          <div class="segmented notification-targets" id="scheduleTargetGroup">
             <button type="button" class="segment active" data-target="all_users">All Employees</button>
             <button type="button" class="segment" data-target="selected_users">Selected Employees</button>
+            <button type="button" class="segment" data-target="office_broadcast">Office Broadcast</button>
+            <button type="button" class="segment" data-target="office_check_in_reminder">Check-in Reminder</button>
+            <button type="button" class="segment" data-target="office_check_out_reminder">Check-out Reminder</button>
           </div>
+          <p class="muted-note" style="margin-top:10px;">Check-in reminders skip employees already checked in. Check-out reminders only reach checked-in employees who have not checked out.</p>
         </div>
 
         <div class="recipient-picker" id="scheduleRecipientPicker" style="display:none;">
@@ -905,6 +924,6 @@
 
   <!-- Scripts -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="/js/app.js?v=13"></script>
+  <script src="/js/app.js?v=14"></script>
 </body>
 </html>

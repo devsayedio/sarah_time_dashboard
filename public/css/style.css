@@ -1114,6 +1114,16 @@ input:checked + .slider:before {
   box-shadow: 0 4px 12px var(--primary-glow);
 }
 
+.notification-targets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+}
+
+.notification-targets .segment {
+  padding-inline: 10px;
+}
+
 /* Recipient picker */
 .recipient-picker {
   margin-top: 16px;
