@@ -49,7 +49,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const EMPLOYEES = 'employees';
 const ATTENDANCE = 'attendance';
-const BUILD_INFO_PATH = path.join(__dirname, 'build-info.json');
 
 function buildInfoValue(value, fallback) {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
@@ -59,9 +58,12 @@ function readBuildInfo() {
   let generatedInfo = {};
 
   try {
-    generatedInfo = JSON.parse(fs.readFileSync(BUILD_INFO_PATH, 'utf8'));
+    // Static require keeps the generated metadata inside the Cloudflare Worker
+    // bundle. A runtime fs read works in local Node.js but cannot see this
+    // project file after Wrangler packages the Worker.
+    generatedInfo = require('./build-info.json');
   } catch (error) {
-    if (error.code !== 'ENOENT') {
+    if (error.code !== 'MODULE_NOT_FOUND') {
       console.warn(`Could not read build metadata: ${error.message}`);
     }
   }
