@@ -21,6 +21,11 @@ let state = {
 const DASHBOARD_BROWSER_CACHE_LIMIT = 31;
 const dashboardDateCache = new Map();
 const dashboardRequestsInFlight = new Map();
+const SETTINGS_BROWSER_CACHE_KEY = 'sarah-time:office-settings:v2';
+const SETTINGS_BROWSER_CACHE_TTL = 10 * 60 * 1000;
+let settingsRequestInFlight = null;
+let settingsCacheRevision = 0;
+let settingsRequestSequence = 0;
 let routeNavigationSequence = 0;
 const TAB_PATHS = Object.freeze({
   dashboard: '/overview',
@@ -539,28 +544,110 @@ function renderStatsCards() {
   document.getElementById('statAbsent').textContent = state.stats.absentCount;
 }
 
+function sortDateOverrides(dateOverrides) {
+  return [...dateOverrides].sort((left, right) => left.dateKey.localeCompare(right.dateKey));
+}
+
+function applySettingsData(settings, dateOverrides, cachedAt = Date.now()) {
+  state.officeSettings = settings;
+  state.dateOverrides = sortDateOverrides(dateOverrides);
+  state.settingsLoaded = true;
+  state.settingsLoadedAt = cachedAt;
+  populateSettingsForm();
+  renderDateOverrides();
+  initOrUpdateMap();
+}
+
+function readSettingsBrowserCache() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(SETTINGS_BROWSER_CACHE_KEY));
+    const isValid = cached &&
+      Number.isFinite(cached.cachedAt) &&
+      cached.cachedAt <= Date.now() &&
+      Date.now() - cached.cachedAt < SETTINGS_BROWSER_CACHE_TTL &&
+      (cached.settings === null ||
+        (typeof cached.settings === 'object' && !Array.isArray(cached.settings))) &&
+      Array.isArray(cached.dateOverrides) &&
+      cached.dateOverrides.every(item => item && typeof item.dateKey === 'string');
+    if (isValid) return cached;
+  } catch (error) {
+    console.warn('Could not read the office settings browser cache:', error);
+  }
+  try {
+    localStorage.removeItem(SETTINGS_BROWSER_CACHE_KEY);
+  } catch (error) {
+    console.warn('Could not clear the office settings browser cache:', error);
+  }
+  return null;
+}
+
+function writeSettingsBrowserCache(cachedAt = Date.now()) {
+  try {
+    localStorage.setItem(SETTINGS_BROWSER_CACHE_KEY, JSON.stringify({
+      cachedAt,
+      settings: state.officeSettings,
+      dateOverrides: state.dateOverrides
+    }));
+  } catch (error) {
+    console.warn('Could not write the office settings browser cache:', error);
+  }
+}
+
+function applySettingsMutation(settings, dateOverrides) {
+  settingsCacheRevision++;
+  const cachedAt = Date.now();
+  applySettingsData(settings, dateOverrides, cachedAt);
+  writeSettingsBrowserCache(cachedAt);
+}
+
 async function fetchSettings({ force = false } = {}) {
   const settingsAreFresh = state.settingsLoaded &&
-    (Date.now() - state.settingsLoadedAt) < 5 * 60 * 1000;
+    (Date.now() - state.settingsLoadedAt) < SETTINGS_BROWSER_CACHE_TTL;
   if (!force && settingsAreFresh) return;
+
+  if (!force) {
+    const cached = readSettingsBrowserCache();
+    if (cached) {
+      applySettingsData(cached.settings, cached.dateOverrides, cached.cachedAt);
+      return;
+    }
+  }
+
+  const revisionAtRequest = settingsCacheRevision;
+  let requestPromise = !force ? settingsRequestInFlight : null;
+  const requestSequence = requestPromise
+    ? settingsRequestSequence
+    : ++settingsRequestSequence;
   showLoader();
   try {
-    const res = await fetch(force ? '/api/settings/office?refresh=1' : '/api/settings/office', {
-      cache: force ? 'no-store' : 'default'
-    });
-    const data = await res.json();
-    if (data.success) {
-      state.officeSettings = data.settings;
-      state.dateOverrides = data.dateOverrides;
-      state.settingsLoaded = true;
-      state.settingsLoadedAt = Date.now();
-      populateSettingsForm();
-      renderDateOverrides();
-      initOrUpdateMap();
+    if (!requestPromise) {
+      requestPromise = (async () => {
+        const res = await fetch(force ? '/api/settings/office?refresh=1' : '/api/settings/office', {
+          cache: force ? 'no-store' : 'default'
+        });
+        if (!res.ok) throw new Error(`Office settings request failed with HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Office settings request failed');
+        return data;
+      })();
+      if (!force) settingsRequestInFlight = requestPromise;
+    }
+
+    const data = await requestPromise;
+    // A write that completed after this request began is newer than the
+    // response, so never let an older in-flight fetch overwrite it.
+    if (revisionAtRequest === settingsCacheRevision &&
+        requestSequence === settingsRequestSequence) {
+      const cachedAt = Date.now();
+      applySettingsData(data.settings, data.dateOverrides, cachedAt);
+      writeSettingsBrowserCache(cachedAt);
     }
   } catch (err) {
     console.error('Error fetching settings:', err);
   } finally {
+    if (!force && settingsRequestInFlight === requestPromise) {
+      settingsRequestInFlight = null;
+    }
     hideLoader();
   }
 }
@@ -1059,7 +1146,9 @@ async function handlePolicySubmit(e) {
     if (data.success) {
       alert('Office policy updated successfully!');
       invalidateDashboardBrowserCache();
-      fetchSettings({ force: true });
+      applySettingsMutation(data.settings, state.dateOverrides);
+    } else {
+      throw new Error(data.error || 'Office policy update failed');
     }
   } catch (err) {
     console.error('Error saving policy:', err);
@@ -1083,8 +1172,13 @@ async function handleOverrideSubmit(e) {
     const data = await res.json();
     if (data.success) {
       document.getElementById('dateOverrideForm').reset();
-      invalidateDashboardBrowserCache(payload.dateKey);
-      fetchSettings({ force: true });
+      const dateKey = data.dateKey || payload.dateKey;
+      const dateOverrides = state.dateOverrides.filter(item => item.dateKey !== dateKey);
+      dateOverrides.push({ dateKey, ...(data.override || payload) });
+      invalidateDashboardBrowserCache(dateKey);
+      applySettingsMutation(state.officeSettings, dateOverrides);
+    } else {
+      throw new Error(data.error || 'Date override update failed');
     }
   } catch (err) {
     console.error('Error adding override:', err);
@@ -1108,7 +1202,12 @@ async function deleteDateOverride(dateKey) {
     const data = await res.json();
     if (data.success) {
       invalidateDashboardBrowserCache(dateKey);
-      fetchSettings({ force: true });
+      applySettingsMutation(
+        state.officeSettings,
+        state.dateOverrides.filter(item => item.dateKey !== dateKey)
+      );
+    } else {
+      throw new Error(data.error || 'Date override deletion failed');
     }
   } catch (err) {
     console.error('Error deleting override:', err);

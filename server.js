@@ -802,22 +802,34 @@ app.delete('/api/attendance/delete', async (req, res) => {
   }
 });
 
-// API 5: Office Settings & Date Overrides
+async function loadOfficePolicy() {
+  const officeDoc = await db.collection('settings').doc('office').get();
+  return officeDoc.exists ? officeDoc.data() : null;
+}
+
+async function loadDateOverrides() {
+  const overridesSnap = await db
+    .collection('settings')
+    .doc('office')
+    .collection('date_overrides')
+    .get();
+
+  const dateOverrides = [];
+  overridesSnap.forEach(doc => {
+    dateOverrides.push({ dateKey: doc.id, ...doc.data() });
+  });
+  return dateOverrides.sort((left, right) => left.dateKey.localeCompare(right.dateKey));
+}
+
+// API 5: Office Settings & Date Overrides. The Worker loads these two parts
+// independently so the rarely changed policy and override list can have
+// different cache lifetimes while the public response contract stays simple.
 app.get('/api/settings/office', async (req, res) => {
   try {
-    const officeDoc = await db.collection('settings').doc('office').get();
-    const settings = officeDoc.exists ? officeDoc.data() : null;
-
-    const overridesSnap = await db
-      .collection('settings')
-      .doc('office')
-      .collection('date_overrides')
-      .get();
-
-    const dateOverrides = [];
-    overridesSnap.forEach(doc => {
-      dateOverrides.push({ dateKey: doc.id, ...doc.data() });
-    });
+    const [settings, dateOverrides] = await Promise.all([
+      loadOfficePolicy(),
+      loadDateOverrides()
+    ]);
 
     res.json({ success: true, settings, dateOverrides });
   } catch (error) {
@@ -2123,5 +2135,7 @@ app.listen(PORT, () => {
 module.exports = {
   app,
   ensureFirebaseInitialized,
+  loadOfficePolicy,
+  loadDateOverrides,
   processDueScheduledNotifications
 };
