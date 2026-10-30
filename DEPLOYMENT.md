@@ -78,20 +78,32 @@ The authenticated Worker checks `DASHBOARD_CACHE` before initializing Firebase:
 - today's dashboard: 60 seconds
 - past dates: 24 hours
 - future dates: 15 minutes
-- office settings: 10 minutes
+- office policy: 30 days
+- date-override list: 7 days
 
 Dashboard responses also use a short, in-memory browser cache (30 seconds for
 today, one hour for past dates and five minutes for future dates). The browser
 keeps at most 31 dates and never persists employee HR details to local storage.
+The non-sensitive Office & Policy payload uses a separate 10-minute,
+versioned browser cache so a reload or a new tab in the same browser profile
+does not trigger another API request.
 
 Successful attendance, employee, office-policy and date-override mutations
-invalidate the affected KV entries. `Refresh Data` sends `refresh=1`, bypasses
-KV, reads Firebase and replaces the cached response. Direct writes from the
-Flutter app to Firestore do not pass through this Worker, so today's 60-second
-TTL is the freshness safety net for those writes.
+invalidate the affected dashboard entries. Policy and override mutations also
+write their returned values directly into KV and the browser cache, so the UI
+does not reread the full Firestore settings collection after every write.
+`Refresh Data` sends `refresh=1`, bypasses both settings KV entries, reads
+Firebase and replaces the cached response.
+
+The long-lived settings cache is only used by the authenticated admin settings
+page. Attendance classification, daily dashboard assembly and scheduled
+reminder eligibility continue to read the office policy and exact-date override
+directly from Firestore. This keeps attendance decisions authoritative even
+while the admin UI benefits from the longer cache.
 
 Inspect cache behaviour on an authenticated dashboard response with the
-`X-Dashboard-Cache` header (`MISS`, `HIT` or `BYPASS`).
+`X-Dashboard-Cache` header (`MISS`, `HIT` or `BYPASS`). Settings responses also
+include `X-Office-Policy-Cache-Ttl` and `X-Date-Overrides-Cache-Ttl`.
 
 ## Dashboard routes
 
